@@ -1,4 +1,5 @@
 import heapq
+from typing import Union
 
 import bmesh
 import bpy
@@ -164,8 +165,6 @@ def rotate_edges(mesh: bmesh.types.BMesh, edges: list):
 
         # Rotate edge in clockwise direction + compute energy
         cw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=False)
-        # print("GIVEN EDGE", edge)
-        # print("CW EDGE", cw_edge)
         cw_edge = cw_edge["edges"][0]
         cw_energy = compute_energy(cw_edge)
 
@@ -250,7 +249,6 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         else:
             tag_updated_faces(mid_vert.link_faces, heap)
 
-        # print("MID VERT", mid_vert)
         # -- Optimizing: Edge rotation --
         cedges = cface.edges if cface else mid_vert.link_edges
         rotated_edge = rotate_edges(mesh, cedges)
@@ -282,6 +280,26 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         i += 1
 
     return mesh
+
+
+def debug_here(
+    bm: bmesh.types.BMesh,
+    element: Union[bmesh.types.BMVert, bmesh.types.BMEdge, bmesh.types.BMFace],
+):
+    obj = bpy.context.object
+
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    for face in bm.faces:
+        face.select_set(False)
+    element.select_set(True)
+
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bm.to_mesh(obj.data)
+    bm.free()
+
+    # terminate the script
+    raise Exception("Debug here")
 
 
 if __name__ == "__main__":
