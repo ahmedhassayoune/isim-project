@@ -35,7 +35,7 @@ def distance_vec(point1: Vector, point2: Vector) -> float:
 def compute_min_diagonal_length(face: bmesh.types.BMFace) -> float:
     """Compute the minimum diagonal length of the given quad face."""
     if len(face.verts) != 4:
-        print("Face is not a quad")
+        print("Warning: Face is not a quad")
         return 0
     v1, v2, v3, v4 = face.verts
     diag1_len = distance_vec(v1.co, v3.co)
@@ -57,7 +57,7 @@ def get_neighbor_vert_from_pos(
     min_vert, min_dist = None, float("inf")
     for edge in vert.link_edges:
         other_vert = edge.other_vert(vert)
-        if vert.co == other_vert.co:
+        if pos == other_vert.co:
             return other_vert
         if (dist := distance_vec(other_vert.co, pos)) < min_dist:
             min_dist, min_vert = dist, other_vert
@@ -126,10 +126,10 @@ def collapse_diagonal(mesh: bmesh.types.BMesh, face: bmesh.types.BMFace):
     # Apply diagonal collapse on mid-point of the shortest diagonal
     mid_position = (v1.co + v3.co) / 2
     if diag1_len > diag2_len:
-        mesh.pointmerge(verts=[v2, v4], merge_co=mid_position)
+        bmesh.ops.pointmerge(mesh, verts=[v2, v4], merge_co=mid_position)
         mid_vert = get_neighbor_vert_from_pos(v1, mid_position)
     else:
-        mesh.pointmerge(verts=[v1, v3], merge_co=mid_position)
+        bmesh.ops.pointmerge(mesh, verts=[v1, v3], merge_co=mid_position)
         mid_vert = get_neighbor_vert_from_pos(v2, mid_position)
 
     return mid_vert
@@ -164,13 +164,18 @@ def rotate_edges(mesh: bmesh.types.BMesh, edges: list):
 
         # Rotate edge in clockwise direction + compute energy
         cw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=False)
+        # print("GIVEN EDGE", edge)
+        # print("CW EDGE", cw_edge)
+        cw_edge = cw_edge["edges"][0]
         cw_energy = compute_energy(cw_edge)
 
         # Revert the rotation
         edge = bmesh.ops.rotate_edges(mesh, edges=[cw_edge], use_ccw=True)
+        edge = edge["edges"][0]
 
         # Rotate edge in counter-clockwise direction + compute energy
         ccw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=True)
+        ccw_edge = ccw_edge["edges"][0]
         ccw_energy = compute_energy(ccw_edge)
 
         if min(base_energy, cw_energy, ccw_energy) == base_energy:
@@ -181,7 +186,10 @@ def rotate_edges(mesh: bmesh.types.BMesh, edges: list):
         if min(cw_energy, ccw_energy) == cw_energy:
             # Revert to other rotation
             edge = bmesh.ops.rotate_edges(mesh, edges=[ccw_edge], use_ccw=False)
+            edge = edge["edges"][0]
+
             cw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=False)
+            cw_edge = cw_edge["edges"][0]
             return cw_edge
 
         return ccw_edge
@@ -214,9 +222,11 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
     """
 
     heap = build_mesh_heap(mesh)
+    i = 0
 
     # Repeat simplification until the desired number of faces is reached
     while len(mesh.faces) > nb_faces:
+        iteration_faces = len(mesh.faces)
         face = heap.pop()
 
         if not face.is_valid or len(face.verts) != 4:
@@ -240,6 +250,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         else:
             tag_updated_faces(mid_vert.link_faces, heap)
 
+        # print("MID VERT", mid_vert)
         # -- Optimizing: Edge rotation --
         cedges = cface.edges if cface else mid_vert.link_edges
         rotated_edge = rotate_edges(mesh, cedges)
@@ -259,10 +270,16 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
                 for cedge in cface1.edges:
                     tag_updated_faces(cedge.link_faces, heap, cface1.index)
 
+        print(f"-- Iteration {i} done --")
+        print(f"-> Total faces = {len(mesh.faces)}")
+        print(f"-> Total removed faces = {iteration_faces - len(mesh.faces)}")
+        print(f"-> Heap size = {len(heap._data)}")
+
         # -- Smoothing: Tangent space smoothing --
 
         # TO REMOVE
         # nb_faces = len(mesh.faces)
+        i += 1
 
     return mesh
 
@@ -275,7 +292,7 @@ if __name__ == "__main__":
     bm = bmesh.new()  # create an empty BMesh
     bm.from_mesh(me)  # fill it in from a Mesh
 
-    bm = simplify_mesh(bm, 10)
+    bm = simplify_mesh(bm, 550)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
