@@ -1,0 +1,19 @@
+name: Ruff
+on:
+    push:
+        branches:
+            - main
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: chartboost/ruff-action@v1
+        with:
+            args: format scripts tests
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+            commit_message: '[RUFF FORMAT]'
+            file_pattern: 'scripts/*.py tests/*.py'
+            push_options: '--force'
