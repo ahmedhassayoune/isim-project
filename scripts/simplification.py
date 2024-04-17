@@ -87,13 +87,14 @@ def remove_doublets(
     """Remove doublets in verts recursively."""
     clean_face = None
     for vert in verts:
-        if vert.index in visited:
+        if not vert.is_valid or vert.index in visited:
             continue
         visited.add(vert.index)
         other_verts = [edge.other_vert(vert) for edge in vert.link_edges]
         face = remove_doublet(mesh, vert)
         if not face:
             continue
+        heap.push(face)
         clean_face = remove_doublets(mesh, other_verts, visited)
         clean_face = clean_face if clean_face else face
 
@@ -113,7 +114,7 @@ def clean_local_zone(mesh: bmesh.types.BMesh, verts: list[bmesh.types.BMVert]):
     return face
 
 
-def tag_updated_faces(faces, out_index=None):
+def tag_updated_faces(faces: list[bmesh.types.BMesh], out_index=None):
     """Tag updated faces and push them to the heap except the one with the given index."""
     for face in faces:
         if face.index == out_index:
@@ -166,7 +167,7 @@ def rotate_edges(mesh: bmesh.types.BMesh, edges: list):
         cw_edge = cw_edge["edges"][0]
         cw_energy = compute_energy(cw_edge)
 
-        # Revert the rotation
+        # Revert rotation
         edge = bmesh.ops.rotate_edges(mesh, edges=[cw_edge], use_ccw=True)
         edge = edge["edges"][0]
 
@@ -231,12 +232,15 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
     This function modifies the input mesh in-place and returns the same object.
     """
 
+    # Initialize the heap with the faces of the input mesh
     build_mesh_heap(mesh)
+
+    initial_mesh_faces = len(mesh.faces)
     global mesh_iteration
     mesh_iteration = 0
 
     # Repeat simplification until the desired number of faces is reached
-    while len(mesh.faces) > nb_faces:
+    while len(heap._data) > 0 and len(mesh.faces) > nb_faces:
         iteration_faces = len(mesh.faces)
         face = heap.pop()
 
@@ -251,10 +255,8 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         mid_vert = collapse_diagonal(mesh, face)
 
         # --> Apply related cleaning operations
-        neighbor_verts = [mid_vert] + [
-            edge.other_vert(mid_vert) for edge in mid_vert.link_edges
-        ]
-        cface = clean_local_zone(mesh, neighbor_verts)
+        neighbor_verts = [edge.other_vert(mid_vert) for edge in mid_vert.link_edges]
+        cface = clean_local_zone(mesh, [mid_vert] + neighbor_verts)
 
         # -- Optimizing: Edge rotation --
         cedges = mid_vert.link_edges if mid_vert.is_valid else cface.edges
@@ -269,7 +271,8 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
 
         print(f"-- Iteration {mesh_iteration} done --")
         print(f"-> Total faces = {len(mesh.faces)}")
-        print(f"-> Total removed faces = {iteration_faces - len(mesh.faces)}")
+        print(f"-> Total removed faces = {initial_mesh_faces - len(mesh.faces)}")
+        print(f"-> Total removed faces (in iter) = {iteration_faces - len(mesh.faces)}")
         print(f"-> Heap size = {len(heap._data)}")
 
         # -- Smoothing: Tangent space smoothing --
