@@ -46,9 +46,9 @@ def compute_min_diagonal_length(face: bmesh.types.BMFace) -> float:
 
 def build_mesh_heap(mesh: bmesh.types.BMesh) -> list:
     faces = list(mesh.faces)
-    heap = MyHeap(initial=faces, key=lambda face: compute_min_diagonal_length(face))
 
-    return heap
+    global heap
+    heap = MyHeap(initial=faces, key=lambda face: compute_min_diagonal_length(face))
 
 
 def get_neighbor_vert_from_pos(
@@ -66,37 +66,43 @@ def get_neighbor_vert_from_pos(
     return min_vert
 
 
-def remove_doublets(mesh: bmesh.types.BMesh, vert: bmesh.types.BMVert):
-    """Remove doublets recursively."""
+def remove_doublet(mesh: bmesh.types.BMesh, vert: bmesh.types.BMVert):
+    """Remove a single doublet."""
     if len(vert.link_faces) != 2:
         return None
 
     # Dissolve linked faces
-    mesh.faces.ensure_lookup_table()
     region = bmesh.ops.dissolve_faces(mesh, faces=vert.link_faces, use_verts=True)
     face = region["region"][0]
+    heap.push(face)
 
-    # Iteratively remove doublets
-    dissolvable = True
-    while dissolvable:
-        dissolvable = False
-        for v in face.verts:
-            if len(v.link_faces) != 2:
-                continue
-            # Dissolve linked faces
-            mesh.faces.ensure_lookup_table()
-            region = bmesh.ops.dissolve_faces(
-                mesh, faces=vert.link_faces, use_verts=True
-            )
-            face = region["region"][0]
-            dissolvable = True
-            break
     return face
 
 
-def clean_local_zone(mesh: bmesh.types.BMesh, vert: bmesh.types.BMVert):
-    # Remove doublets iteratively
-    face = remove_doublets(mesh, vert)
+def remove_doublets(
+    mesh: bmesh.types.BMesh,
+    verts: list[bmesh.types.BMVert],
+    visited: set = set(),
+):
+    """Remove doublets in verts recursively."""
+    clean_face = None
+    for vert in verts:
+        if vert.index in visited:
+            continue
+        visited.add(vert.index)
+        other_verts = [edge.other_vert(vert) for edge in vert.link_edges]
+        face = remove_doublet(mesh, vert)
+        if not face:
+            continue
+        clean_face = remove_doublets(mesh, other_verts, visited)
+        clean_face = clean_face if clean_face else face
+
+    return clean_face
+
+
+def clean_local_zone(mesh: bmesh.types.BMesh, verts: list[bmesh.types.BMVert]):
+    # Remove doublets recursively
+    face = remove_doublets(mesh, verts)
     if not face:
         return None
 
@@ -107,7 +113,7 @@ def clean_local_zone(mesh: bmesh.types.BMesh, vert: bmesh.types.BMVert):
     return face
 
 
-def tag_updated_faces(faces, heap: MyHeap, out_index=None):
+def tag_updated_faces(faces, out_index=None):
     """Tag updated faces and push them to the heap except the one with the given index."""
     for face in faces:
         if face.index == out_index:
@@ -138,15 +144,7 @@ def collapse_diagonal(mesh: bmesh.types.BMesh, face: bmesh.types.BMFace):
 
 def compute_energy(edge: bmesh.types.BMEdge) -> float:
     """Compute the energy of the given edge."""
-    face1, face2 = edge.link_faces[0], edge.link_faces[1]
-    v1, v2 = edge.verts[0], edge.verts[1]
-
-    # Build the list of 6 vertices of the two faces
-    verts = [v1, v2]
-    all_verts = list(face1.verts) + list(face2.verts)
-    for v in all_verts:
-        if v.index != v1.index and v.index != v2.index:
-            verts.append(v)
+    verts = get_unique_verts(edge.link_faces)
 
     # Transform to a list valence of each vertex
     verts = np.array([len(v.link_edges) for v in verts])
@@ -196,6 +194,19 @@ def rotate_edges(mesh: bmesh.types.BMesh, edges: list):
     return None
 
 
+def get_unique_verts(faces: list[bmesh.types.BMFace]) -> list[bmesh.types.BMVert]:
+    """Get a list of unique vertices from the given list of faces."""
+    verts = []
+    set_visited = set()
+
+    for face in faces:
+        for vert in face.verts:
+            if vert.index not in set_visited:
+                verts.append(vert)
+                set_visited.add(vert.index)
+    return verts
+
+
 def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
     """
     Apply quad mesh simplification to reduce the number of faces in the given BMesh object.
@@ -220,8 +231,9 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
     This function modifies the input mesh in-place and returns the same object.
     """
 
-    heap = build_mesh_heap(mesh)
-    i = 0
+    build_mesh_heap(mesh)
+    global mesh_iteration
+    mesh_iteration = 0
 
     # Repeat simplification until the desired number of faces is reached
     while len(mesh.faces) > nb_faces:
@@ -239,36 +251,23 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         mid_vert = collapse_diagonal(mesh, face)
 
         # --> Apply related cleaning operations
-        cface = clean_local_zone(mesh, mid_vert)
-
-        # --> Tag all updated faces and push them to the heap
-        if cface:
-            heap.push(cface)
-            for cedge in cface.eges:
-                tag_updated_faces(cedge.link_faces, heap, cface.index)
-        else:
-            tag_updated_faces(mid_vert.link_faces, heap)
+        neighbor_verts = [mid_vert] + [
+            edge.other_vert(mid_vert) for edge in mid_vert.link_edges
+        ]
+        cface = clean_local_zone(mesh, neighbor_verts)
 
         # -- Optimizing: Edge rotation --
-        cedges = cface.edges if cface else mid_vert.link_edges
+        cedges = mid_vert.link_edges if mid_vert.is_valid else cface.edges
         rotated_edge = rotate_edges(mesh, cedges)
 
         # --> Apply related cleaning operations + Tag updated faces
         if rotated_edge:
-            mesh.edges.ensure_lookup_table()
-            cface1 = clean_local_zone(mesh, rotated_edge.verts[0])
-            cface2 = clean_local_zone(mesh, rotated_edge.verts[1])
+            tag_updated_faces(rotated_edge.link_faces)
 
-            if cface2:
-                heap.push(cface2)
-                for cedge in cface2.edges:
-                    tag_updated_faces(cedge.link_faces, heap, cface2.index)
-            if cface1 and (not cface2 or cface1.index != cface2.index):
-                heap.push(cface1)
-                for cedge in cface1.edges:
-                    tag_updated_faces(cedge.link_faces, heap, cface1.index)
+            verts = get_unique_verts(rotated_edge.link_faces)
+            clean_local_zone(mesh, verts)
 
-        print(f"-- Iteration {i} done --")
+        print(f"-- Iteration {mesh_iteration} done --")
         print(f"-> Total faces = {len(mesh.faces)}")
         print(f"-> Total removed faces = {iteration_faces - len(mesh.faces)}")
         print(f"-> Heap size = {len(heap._data)}")
@@ -277,14 +276,16 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
 
         # TO REMOVE
         # nb_faces = len(mesh.faces)
-        i += 1
+        mesh_iteration += 1
 
     return mesh
 
 
 def debug_here(
     bm: bmesh.types.BMesh,
-    element: Union[bmesh.types.BMVert, bmesh.types.BMEdge, bmesh.types.BMFace],
+    elements: list[
+        Union[bmesh.types.BMVert, bmesh.types.BMEdge, bmesh.types.BMFace]
+    ] = [],
 ):
     obj = bpy.context.object
 
@@ -292,7 +293,8 @@ def debug_here(
     bpy.ops.object.mode_set(mode="EDIT")
     for face in bm.faces:
         face.select_set(False)
-    element.select_set(True)
+    for element in elements:
+        element.select_set(True)
 
     bpy.ops.object.mode_set(mode="OBJECT")
     bm.to_mesh(obj.data)
