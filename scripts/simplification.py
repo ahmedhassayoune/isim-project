@@ -103,7 +103,7 @@ def remove_doublets(
             continue
         heap.push(face)
         clean_face = remove_doublets(mesh, other_verts, visited)
-        clean_face = clean_face if clean_face else face
+        clean_face = clean_face if clean_face is not None else face
 
     return clean_face
 
@@ -115,7 +115,6 @@ def clean_local_zone(mesh: bmesh.types.BMesh, verts: list[bmesh.types.BMVert]):
         return None
 
     # Remove potiential generated singlets
-    mesh.edges.ensure_lookup_table()
     bmesh.ops.dissolve_degenerate(mesh, edges=face.edges)
 
     return face
@@ -138,16 +137,15 @@ def collapse_diagonal(mesh: bmesh.types.BMesh, face: bmesh.types.BMFace):
         distance_vec(v2.co, v4.co),
     )
 
-    # Get mid-point of the shortest diagonal
-    mid_position = (v1.co + v3.co) / 2
-
     # Apply diagonal collapse on mid-point of the shortest diagonal
-    if diag1_len > diag2_len:
-        bmesh.ops.pointmerge(mesh, verts=[v2, v4], merge_co=mid_position)
-        mid_vert = get_neighbor_vert_from_pos(v1, mid_position)
-    else:
+    if diag1_len < diag2_len:
+        mid_position = (v1.co + v3.co) / 2
         bmesh.ops.pointmerge(mesh, verts=[v1, v3], merge_co=mid_position)
         mid_vert = get_neighbor_vert_from_pos(v2, mid_position)
+    else:
+        mid_position = (v2.co + v4.co) / 2
+        bmesh.ops.pointmerge(mesh, verts=[v2, v4], merge_co=mid_position)
+        mid_vert = get_neighbor_vert_from_pos(v1, mid_position)
 
     mid_vert.normal_update()  # maybe useless
 
@@ -274,20 +272,31 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
     global mesh_iteration
     mesh_iteration = 0
 
+    total_invalid_faces = 0
+    total_non_quad_faces = 0
+    total_tagged_faces = 0
+
     # Repeat simplification until the desired number of faces is reached
     while len(heap._data) > 0 and len(mesh.faces) > nb_faces:
         iteration_faces = len(mesh.faces)
         face = heap.pop()
 
-        if not face.is_valid or len(face.verts) != 4:
+        if not face.is_valid:
+            total_invalid_faces += 1
             continue
 
         if face.tag:
             face.tag = False
+            total_tagged_faces += 1
+            continue
+
+        if len(face.verts) != 4:
+            total_non_quad_faces += 1
             continue
 
         # -- Coarsening: Diagonal collapse --
         mid_vert = collapse_diagonal(mesh, face)
+        tag_updated_faces(mid_vert.link_faces)
 
         # --> Apply related cleaning operations
         neighbor_verts = [edge.other_vert(mid_vert) for edge in mid_vert.link_edges]
@@ -304,17 +313,25 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
             verts = get_unique_verts(rotated_edge.link_faces)
             clean_local_zone(mesh, verts)
 
+        # -- Smoothing: Tangent space smoothing --
+
         print(f"-- Iteration {mesh_iteration} done --")
         print(f"-> Total faces = {len(mesh.faces)}")
         print(f"-> Total removed faces = {initial_mesh_faces - len(mesh.faces)}")
         print(f"-> Total removed faces (in iter) = {iteration_faces - len(mesh.faces)}")
         print(f"-> Heap size = {len(heap._data)}")
 
-        # -- Smoothing: Tangent space smoothing --
-
-        # TO REMOVE
-        # nb_faces = len(mesh.faces)
         mesh_iteration += 1
+
+    print("--- # Simplification DONE # ---")
+    print(f"Final number of faces: {len(mesh.faces)}")
+    print(f"Heap size: {len(heap._data)}")
+    print(f"Total iterations: {mesh_iteration}")
+    print()
+    print("--- # Stats # ---")
+    print(f"Total invalid faces: {total_invalid_faces}")
+    print(f"Total non-quad faces: {total_non_quad_faces}")
+    print(f"Total tagged faces: {total_tagged_faces}")
 
     return mesh
 
@@ -350,7 +367,7 @@ if __name__ == "__main__":
     bm = bmesh.new()  # create an empty BMesh
     bm.from_mesh(me)  # fill it in from a Mesh
 
-    bm = simplify_mesh(bm, 550)
+    bm = simplify_mesh(bm, 300)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
