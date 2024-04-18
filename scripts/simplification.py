@@ -4,7 +4,7 @@ from typing import Union
 import bmesh
 import bpy
 import numpy as np
-from mathutils import Vector
+from mathutils import Vector, bvhtree
 
 
 class MyHeap(object):
@@ -44,7 +44,14 @@ def compute_min_diagonal_length(face: bmesh.types.BMFace) -> float:
     return min(diag1_len, diag2_len)
 
 
+def build_bvh_tree(mesh: bmesh.types.BMesh):
+    """Build a BVH tree for the given mesh."""
+    global bvh
+    bvh = bvhtree.BVHTree.FromBMesh(mesh.copy())
+
+
 def build_mesh_heap(mesh: bmesh.types.BMesh) -> list:
+    """Build a heap with the faces of the given mesh."""
     faces = list(mesh.faces)
 
     global heap
@@ -103,7 +110,7 @@ def remove_doublets(
 
 def clean_local_zone(mesh: bmesh.types.BMesh, verts: list[bmesh.types.BMVert]):
     # Remove doublets recursively
-    face = remove_doublets(mesh, verts)
+    face = remove_doublets(mesh, verts, set())
     if not face:
         return None
 
@@ -131,8 +138,10 @@ def collapse_diagonal(mesh: bmesh.types.BMesh, face: bmesh.types.BMFace):
         distance_vec(v2.co, v4.co),
     )
 
-    # Apply diagonal collapse on mid-point of the shortest diagonal
+    # Get mid-point of the shortest diagonal
     mid_position = (v1.co + v3.co) / 2
+
+    # Apply diagonal collapse on mid-point of the shortest diagonal
     if diag1_len > diag2_len:
         bmesh.ops.pointmerge(mesh, verts=[v2, v4], merge_co=mid_position)
         mid_vert = get_neighbor_vert_from_pos(v1, mid_position)
@@ -140,6 +149,29 @@ def collapse_diagonal(mesh: bmesh.types.BMesh, face: bmesh.types.BMFace):
         bmesh.ops.pointmerge(mesh, verts=[v1, v3], merge_co=mid_position)
         mid_vert = get_neighbor_vert_from_pos(v2, mid_position)
 
+    mid_vert.normal_update()  # maybe useless
+
+    # Cast 2 opposite rays from the mid-vertex to find the hit positions on source mesh M0
+    hit_pos, _, _, dist = bvh.ray_cast(mid_vert.co, mid_vert.normal)
+    hit_pos_opp, _, _, dist_opp = bvh.ray_cast(mid_vert.co, -mid_vert.normal)
+
+    # Handle case where no hit position is found
+    if not hit_pos and not hit_pos_opp:
+        print("Warning: No hit position or normal")
+        return mid_vert
+
+    if dist is None:
+        dist = float("inf")
+    if dist_opp is None:
+        dist_opp = float("inf")
+    # Get the closest hit position to the mid-vertex
+    if dist < dist_opp:
+        proj_mid_vert = hit_pos
+    else:
+        proj_mid_vert = hit_pos_opp
+
+    # Project mid-vertex on the hit position
+    bmesh.ops.pointmerge(mesh, verts=[mid_vert], merge_co=proj_mid_vert)
     return mid_vert
 
 
@@ -161,7 +193,6 @@ def rotate_edges(mesh: bmesh.types.BMesh, edges: list):
             continue
 
         base_energy = compute_energy(edge)
-
         # Rotate edge in clockwise direction + compute energy
         cw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=False)
         cw_edge = cw_edge["edges"][0]
@@ -188,6 +219,7 @@ def rotate_edges(mesh: bmesh.types.BMesh, edges: list):
 
             cw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=False)
             cw_edge = cw_edge["edges"][0]
+
             return cw_edge
 
         return ccw_edge
@@ -231,6 +263,9 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
     Note:
     This function modifies the input mesh in-place and returns the same object.
     """
+
+    # Initialize bvh tree of input mesh for spatial queries
+    build_bvh_tree(mesh)
 
     # Initialize the heap with the faces of the input mesh
     build_mesh_heap(mesh)
