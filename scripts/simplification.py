@@ -1,5 +1,6 @@
 import heapq
 from typing import Union
+from uuid import uuid4
 
 import bmesh
 import bpy
@@ -13,19 +14,36 @@ class MyHeap(object):
     def __init__(self, initial=None, key=lambda x: x):
         self.key = key
         self.index = 0
+        self._data = []
         if initial:
-            self._data = [(key(item), i, item) for i, item in enumerate(initial)]
+            for i, item in enumerate(initial):
+                elem_uuid = uuid4().bytes
+                heap_elem = (key(item), i, elem_uuid, item)
+                item[uid_layer] = elem_uuid
+                heap_elem_occ[elem_uuid] = 1
+                self._data.append(heap_elem)
             self.index = len(self._data)
             heapq.heapify(self._data)
-        else:
-            self._data = []
 
     def push(self, item):
-        heapq.heappush(self._data, (self.key(item), self.index, item))
+        # if len(item.verts) != 4:  # FIXME: Should not happen
+        #     return None
+        if item[uid_layer] == 0:  # New item
+            elem_uuid = uuid4().bytes
+            heap_elem = (self.key(item), self.index, elem_uuid, item)
+            heap_elem_occ[elem_uuid] = 1
+        else:
+            heap_elem = (self.key(item), self.index, item[uid_layer], item)
+            heap_elem_occ[item[uid_layer]] += 1
+
+        heapq.heappush(self._data, heap_elem)
         self.index += 1
 
     def pop(self):
-        return heapq.heappop(self._data)[2]
+        elem = heapq.heappop(self._data)
+        elem_uuid = elem[2]
+        heap_elem_occ[elem_uuid] -= 1
+        return elem
 
 
 def distance_vec(point1: Vector, point2: Vector) -> float:
@@ -37,7 +55,7 @@ def compute_min_diagonal_length(face: bmesh.types.BMFace) -> float:
     """Compute the minimum diagonal length of the given quad face."""
     if len(face.verts) != 4:
         print("Warning: Face is not a quad")
-        return 0
+        return float("inf")
     v1, v2, v3, v4 = face.verts
     diag1_len = distance_vec(v1.co, v3.co)
     diag2_len = distance_vec(v2.co, v4.co)
@@ -51,10 +69,15 @@ def build_bvh_tree(mesh: bmesh.types.BMesh):
 
 
 def build_mesh_heap(mesh: bmesh.types.BMesh) -> list:
-    """Build a heap with the faces of the given mesh."""
-    faces = list(mesh.faces)
+    """Build a heap with the faces of the given mesh. Assign a unique id to each face."""
+    global uid_layer
+    uid_layer = bm.faces.layers.string.new("uid")
+
+    global heap_elem_occ
+    heap_elem_occ = dict()
 
     global heap
+    faces = list(mesh.faces)
     heap = MyHeap(initial=faces, key=lambda face: compute_min_diagonal_length(face))
 
 
@@ -120,12 +143,11 @@ def clean_local_zone(mesh: bmesh.types.BMesh, verts: list[bmesh.types.BMVert]):
     return face
 
 
-def tag_updated_faces(faces: list[bmesh.types.BMesh], out_index=None):
-    """Tag updated faces and push them to the heap except the one with the given index."""
+def push_updated_faces(faces: list[bmesh.types.BMesh], out_index=None):
+    """Push updated faces to the heap except the one with the given index."""
     for face in faces:
         if face.index == out_index:
             continue
-        face.tag = True
         heap.push(face)
 
 
@@ -136,7 +158,6 @@ def collapse_diagonal(mesh: bmesh.types.BMesh, face: bmesh.types.BMFace):
         distance_vec(v1.co, v3.co),
         distance_vec(v2.co, v4.co),
     )
-
     # Apply diagonal collapse on mid-point of the shortest diagonal
     if diag1_len < diag2_len:
         mid_position = (v1.co + v3.co) / 2
@@ -238,6 +259,17 @@ def get_unique_verts(faces: list[bmesh.types.BMFace]) -> list[bmesh.types.BMVert
     return verts
 
 
+def compute_stats(mesh: bmesh.types.BMesh):
+    """Compute stats of the given mesh."""
+    mesh_faces = len(mesh.faces)
+    heap_faces = 0
+    for _, _, _, face in heap._data:
+        if face.is_valid:
+            heap_faces += 1
+
+    return mesh_faces - heap_faces + 1
+
+
 def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
     """
     Apply quad mesh simplification to reduce the number of faces in the given BMesh object.
@@ -273,21 +305,25 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
     mesh_iteration = 0
 
     total_invalid_faces = 0
+    total_outdated_faces = 0
     total_non_quad_faces = 0
-    total_tagged_faces = 0
 
     # Repeat simplification until the desired number of faces is reached
     while len(heap._data) > 0 and len(mesh.faces) > nb_faces:
         iteration_faces = len(mesh.faces)
-        face = heap.pop()
+
+        min_diag, _, uid, face = heap.pop()
 
         if not face.is_valid:
             total_invalid_faces += 1
             continue
 
-        if face.tag:
-            face.tag = False
-            total_tagged_faces += 1
+        occ = heap_elem_occ[uid]
+        if occ is None:  # <-- Should not happen
+            debug_here(mesh, [face])
+
+        if occ >= 1 and min_diag != compute_min_diagonal_length(face):
+            total_outdated_faces += 1
             continue
 
         if len(face.verts) != 4:
@@ -296,7 +332,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
 
         # -- Coarsening: Diagonal collapse --
         mid_vert = collapse_diagonal(mesh, face)
-        tag_updated_faces(mid_vert.link_faces)
+        push_updated_faces(mid_vert.link_faces)
 
         # --> Apply related cleaning operations
         neighbor_verts = [edge.other_vert(mid_vert) for edge in mid_vert.link_edges]
@@ -306,9 +342,9 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         cedges = mid_vert.link_edges if mid_vert.is_valid else cface.edges
         rotated_edge = rotate_edges(mesh, cedges)
 
-        # --> Apply related cleaning operations + Tag updated faces
+        # --> Apply related cleaning operations + push updated faces
         if rotated_edge:
-            tag_updated_faces(rotated_edge.link_faces)
+            push_updated_faces(rotated_edge.link_faces)
 
             verts = get_unique_verts(rotated_edge.link_faces)
             clean_local_zone(mesh, verts)
@@ -330,8 +366,8 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
     print()
     print("--- # Stats # ---")
     print(f"Total invalid faces: {total_invalid_faces}")
+    print(f"Total outdated faces: {total_outdated_faces}")
     print(f"Total non-quad faces: {total_non_quad_faces}")
-    print(f"Total tagged faces: {total_tagged_faces}")
 
     return mesh
 
@@ -367,7 +403,9 @@ if __name__ == "__main__":
     bm = bmesh.new()  # create an empty BMesh
     bm.from_mesh(me)  # fill it in from a Mesh
 
-    bm = simplify_mesh(bm, 300)
+    global test_var
+    test_var = bm
+    bm = simplify_mesh(bm, 350)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
