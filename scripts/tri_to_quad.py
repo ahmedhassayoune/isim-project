@@ -1,153 +1,248 @@
 import bpy
 import bmesh
 
-obj = bpy.context.scene.objects["Icosphere"]
+def prepareTriangle(mesh: bmesh.types.BMesh) -> bmesh.types.BMesh:
+    """
+    Transform the mesh to a redefinition of it with an even number of
+    triangles.
+    
+    This function search a border edge and split it in half.
+    (Condition : Not closed)
 
-# To be sure to have
-# 0 --- 1
-# |     |
-# 3 --- 2
-# With (1,3) the common edge of (0,1,3) and (1,2,3)
-def getVertArrayFrom(triangle0, triangle1, commonEdge):
-    vertices = []
-    for vert in triangle0.verts:
-        if vert not in commonEdge.verts:
-            vertices.append(vert)
+    If the mesh is closed (= no border edge) and two-manifold, there is
+    always an even number of triangles.
+    
+    Parameters:
+    - mesh (bmesh.types.BMesh): The input triangle BMesh object representing
+                                the mesh to be converted.
+
+    Returns:
+    - bmesh.types.BMesh: The triangle BMesh object with an even number of
+                         triangles.
+
+    Note:
+    This function modifies the input mesh in-place and returns the same object.
+    """  
+    mesh.edges.ensure_lookup_table()
+    
+    # Search of a border edge
+    borderEdge = None
+    for edge in mesh.edges:
+        if edge.is_boundary:
+            borderEdge = edge
             break
-    vertices.append(commonEdge.verts[0])
-    for vert in triangle1.verts:
-        if vert not in commonEdge.verts:
-            vertices.append(vert)
+    
+    if borderEdge is None: # If this condition is reached, the mesh is invalid (not two-manifold)
+        raise RuntimeError('Call to prepareTriangle with a closed mesh.') 
+    
+    faceToDivide = borderEdge.link_faces[0]
+    
+    # Search of the opposed vertex
+    opposedVert = None
+    for vert in faceToDivide.verts:
+        if vert not in borderEdge.verts:
+            opposedVert = vert
             break
-    vertices.append(commonEdge.verts[1])
-    return vertices
 
-def squareness(edge):
-    triangles = edge.link_faces
-    if len(triangles) != 2:
-        return 3 # Bigger than the max dot_sum
+    # Mesh modification
+    mesh.edges.remove(borderEdge)
+    middle = mesh.verts.new((borderEdge.verts[0].co + borderEdge.verts[1].co) / 2)
+    mesh.faces.new([middle, borderEdge.verts[0], opposedVert])
+    mesh.faces.new([middle, borderEdge.verts[1], opposedVert])
+    
+    return mesh
 
-    vertices = getVertArrayFrom(triangles[0], triangles[1], edge)
+def merge(
+    t0: bmesh.types.BMFace, t1: bmesh.types.BMFace,
+) -> (bmesh.types.BMEdge, [bmesh.types.BMVert]):
+    """
+    Returns the edge to remove and the vertices of the theoric face that
+    would result if the triangle parameter faces were merged.
+    """
+    Vert_t0 = None
+    Vert_t1 = None
+    CommonEdge = None
 
+    for edge in t0.edges:
+        if edge in t1.edges:
+            CommonEdge = edge
+            break
+    
+    for vert in t0.verts:
+        if vert not in CommonEdge.verts:
+            Vert_t0 = vert
+            break
+
+    for vert in t1.verts:
+        if vert not in CommonEdge.verts:
+            Vert_t1 = vert
+            break
+
+    # Vertices in the right order
+    verts = [Vert_t0, CommonEdge.verts[0], Vert_t1, CommonEdge.verts[1]]
+
+    return CommonEdge, verts
+
+def squareness(edge: bmesh.types.BMEdge) -> float:
+    """
+    Calculate sum of pairwise dot products of the four normalized edges
+    of the theoric face that would result if the parameter edge was dissolved.
+    """
+    if edge.is_boundary:
+        return 3 # Bigger than the maximum possible squareness
+    
+    # Get the 4 vertices of the theoric face in the right order
+    _, vertices = merge(edge.link_faces[0], edge.link_faces[1])
+    
+    # Compute the normalized edges
     v01 = (vertices[1].co - vertices[0].co).normalized()
     v03 = (vertices[3].co - vertices[0].co).normalized()
     v21 = (vertices[1].co - vertices[2].co).normalized()
     v23 = (vertices[3].co - vertices[2].co).normalized()
-
+    
+    # Compute the sum of pairwise dot products
     dot_sum = 0 
     dot_sum += abs(v01.dot(v03))
     dot_sum += abs(v21.dot(v23))
 
-    # dot_sum = 0 : rectangle
-    # dot_sum >>> 0 : little squareness
     return dot_sum
 
-def input_preparation(obj):
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
+# def ...
 
-    if len(bm.faces) % 2 == 1: # impossible on a closed mesh
-        bm.edges.ensure_lookup_table()
+def correctQuad(quad: bmesh.types.BMFace) -> bmesh.types.BMFace:
+    """
+    Transform a quad mesh to put all its vertices on the same plane, while
+    attempting to preserve the structure.
+    
+    Note:
+    This function modifies the input mesh in-place and returns the same object.
+    """
+    v0, v1, v2, v3 = quad.verts[0], quad.verts[1], quad.verts[2], quad.verts[3]
 
-        # Search of a border edge
-        edge = None
-        for edge in bm.edges:
-            if edge.is_boundary:
-                break
-        triangle = edge.link_faces[0]
-        # Search of the opposed vertex
-        for opposed_vert in triangle.verts:
-            if opposed_vert not in edge.verts:
-                break
+    # Compute the chosen plane
+    middle_O2 = (v0.co + v2.co) / 2
+    middle_13 = (v1.co + v3.co) / 2
+    center = (middle_O2 + middle_13) / 2
 
-        # Mesh modification
-        bm.faces.remove(triangle)
-        middle = bm.verts.new((edge.verts[0].co + edge.verts[1].co) / 2)
-        bm.faces.new([middle, edge.verts[0], opposed_vert])
-        bm.faces.new([middle, edge.verts[1], opposed_vert])
-        bm.to_mesh(obj.data)
-        obj.data.update()
+    # Projection on the plane
+    v0.co += center - middle_O2
+    v2.co += center - middle_O2
+    v1.co += center - middle_13
+    v3.co += center - middle_13
+    
+    return quad
 
-    bm.free()
+def triToQuad(mesh: bmesh.types.BMesh) -> bmesh.types.BMesh:
+    """
+    Apply tri-to-quad mesh conversion to prepare the application of the
+    quad mesh simplification.
 
-# With this configuration
-# 0 ----- 1
-# |       |
-# 3 ----- 2
-def align(v0, v1, v2, v3):
-    i = (v0.co + v2.co) / 2
-    j = (v1.co + v3.co) / 2
-    k = (i + j) / 2
-    v0.co += k - i
-    v2.co += k - i
-    v1.co += k - j
-    v3.co += k - j
+    This function convert the input triangle mesh to a quad mesh while
+    attempting to preserve the overall shape and structure of the mesh.
+    To achieve simplification it applies the following local operations :
+        - quad-dominant mesh: edge collapse
+        - pure quad-mesh: edge flip and collapse
+    but it will be optimised doing :
+        - quad-dominant mesh: theoric edge collapse
+        - pure quad-mesh: theoric edge flip and collapse
+        - application: effective edge collapse
+    which will allow not to apply edge flip.
 
-def toQuadDominant(obj):
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
+    Parameters:
+    - mesh (bmesh.types.BMesh): The input triangle BMesh object representing
+                                the mesh to be converted.
 
-    bm.edges.ensure_lookup_table()
-    bm.faces.ensure_lookup_table()
+    Returns:
+    - bmesh.types.BMesh: The quad BMesh object.
 
-    # Squareness score
-    scores = [0] * len(bm.edges)
-    for edge in bm.edges:
-        scores[edge.index] = squareness(edge)
-    selected_edges = [0] * len(bm.faces)
-    for face in bm.faces:
-        selected_edges[face.index] = min(face.edges, key=lambda x: scores[x.index])
+    Note:
+    This function modifies the input mesh in-place and returns the same object.
+    """
+    l_faces = len(mesh.faces)
+    if l_faces % 2 == 1:
+        # Transform the mesh to a redefinition of it with an even number of triangles.
+        prepareTriangle(mesh)
+    
+    # Tool used to preserve the overall shape and structure
+    mesh.edges.ensure_lookup_table()
+    squarenessList = [squareness(edge) for edge in mesh.edges]
 
-    # Quad creation
-    faces_to_add = []
-    edge_to_remove = []
-    for i in range(len(selected_edges)):
-        s = selected_edges[i]
-        if s is None:
-            continue # Face i already merged
+    # Tool used to realise the mesh conversion
+    mesh.faces.ensure_lookup_table()
+    mergeList = {face.index: None for face in mesh.faces}
+    
+    # -- Quad-dominant mesh: theoric edge collapse --
+    
+    # Tool used to know best candidate edge to be dissolved for each triangle
+    optimalEdges = [min(face.edges, key=lambda x: squarenessList[x.index]) for face in mesh.faces]
+    
+    for i in range(l_faces):
+        if mergeList[i] is not None: # Face i is already linked
+            continue
 
-        # Get the two faces
-        t0 = bm.faces[i]
-        t1 = s.link_faces[0]
-        if t0 == t1:
-            t1 = s.link_faces[1]
+        optimalEdge = optimalEdges[i]
+        
+        # Get the other face using the optimal edge
+        j = optimalEdge.link_faces[0].index
+        if i == j:
+            j = optimalEdge.link_faces[1].index
 
-        if selected_edges[t1.index] is None:
-            continue # Face t1 already merged
+        if mergeList[j] is not None: # Face j is already linked
+            continue
 
-        if scores[selected_edges[t0.index].index] > scores[selected_edges[t1.index].index]:
-            continue # Face t1 have a better edge squareness
+        i_score = squarenessList[optimalEdge.index]
+        j_score = squarenessList[optimalEdges[j].index]
+        if i_score > j_score: # Face j have a better (smaller) match
+            continue
 
-        selected_edges[t1.index] = None # Flagged as merged
+        mergeList[i] = j
+        mergeList[j] = i
+    
+    # -- Pure quad-mesh: theoric edge flip and collapse --
+    # toPureQuad(mesh, squarenessList, mergeList)
+    
+    # -- Application: effective edge flip and collapse --
 
-        faces_to_add.append(getVertArrayFrom(t0, t1, selected_edges[t0.index]))
-        edge_to_remove.append(selected_edges[t0.index])
+    # Tool used to know which face is already merged
+    merged = [False] * l_faces
 
-    # Mesh modification
-    for edge in edge_to_remove:
-        if edge is not None:
-            bm.edges.remove(edge)
+    edgesToRemove = []
+    facesToAdd = []
 
-    for face in faces_to_add:
-        f = bm.faces.new(face)
-        f.select_set(True)
-        align(f.verts[0], f.verts[1], f.verts[2], f.verts[3])
+    for i in range(l_faces):
+        if merged[i] or mergeList[i] is None: # Face i is already merged or unmergeable
+            continue
+        
+        j = mergeList[i]
+        merged[i] = True
+        merged[j] = True
 
-    bm.to_mesh(obj.data)
-    obj.data.update()
-    bm.free()
+        edgeToRemove, faceToAdd = merge(mesh.faces[i], mesh.faces[j])
+        
+        edgesToRemove.append(edgeToRemove)
+        facesToAdd.append(faceToAdd)
 
-"""
-def toPureQuad(obj):
-    bm = bmesh.new()
-    bm.from_mesh(obj.data)
+    for edge in edgesToRemove:
+        mesh.edges.remove(edge)
 
-    # TODO
-    bm.to_mesh(obj.data)
-    obj.data.update()
-    bm.free()
-"""
+    for face in facesToAdd:
+        meshFace = mesh.faces.new(face)
+        correctQuad(meshFace)
 
-input_preparation(obj)
-toQuadDominant(obj)
-# toPureQuad(obj)
+    return mesh
+
+if __name__ == "__main__":
+    # Get the active mesh
+    me = bpy.context.object.data
+
+    # Get a BMesh representation
+    bm = bmesh.new()  # create an empty BMesh
+    bm.from_mesh(me)  # fill it in from a Mesh
+
+    bm = triToQuad(bm)
+
+    # Finish up, write the bmesh back to the mesh
+    bm.to_mesh(me)
+    bm.free()  # free and prevent further access
+    
+    me.update()
