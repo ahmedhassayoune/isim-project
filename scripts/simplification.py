@@ -273,31 +273,41 @@ def get_unique_verts(faces: list[bmesh.types.BMFace]) -> list[bmesh.types.BMVert
     return verts
 
 
-def smooth_mesh(verts: list[bmesh.types.BMVert]):
-    """Smooth the local zone of the given vertices."""
+def smooth_mesh(verts: list[bmesh.types.BMVert], relax_iter: int = 10):
+    """Smooth the local zone of the given vertices with `relax_iter` iterations."""
     euler_step = 0.1
+    convergence_threshold = 0.001
 
-    average_length = np.zeros(len(verts), dtype=float)
-    average_forces = np.array([Vector((0.0, 0.0, 0.0))] * len(verts))
-    for i, vert in enumerate(verts):
-        # Compute the average length of the edges of each vertex
-        average_length[i] = np.mean([edge.calc_length() for edge in vert.link_edges])
-
-        # Compute the average forces of each vertex based on the average length
-        for edge in vert.link_edges:
-            other = edge.other_vert(vert)
-            force_vec = vert.co - other.co
-            average_forces[i] += force_vec.normalized() * (
-                average_length[i] - force_vec.length
+    for i in range(relax_iter):
+        average_length = np.zeros(len(verts), dtype=float)
+        average_forces = np.array([Vector((0.0, 0.0, 0.0))] * len(verts))
+        for i, vert in enumerate(verts):
+            # Compute the average length of the edges of each vertex
+            average_length[i] = np.mean(
+                [edge.calc_length() for edge in vert.link_edges]
             )
 
-    # Update the position of each vertex based on the average forces
-    for i, vert in enumerate(verts):
-        new_vert_pos = average_forces[i] * euler_step + vert.co
-        closest_pos, _, _, dist = bvh.find_nearest(new_vert_pos)
-        if closest_pos is None:
-            continue
-        vert.co = closest_pos
+            # Compute the average forces of each vertex based on the average length
+            for edge in vert.link_edges:
+                other = edge.other_vert(vert)
+                force_vec = vert.co - other.co
+                average_forces[i] += force_vec.normalized() * (
+                    average_length[i] - force_vec.length
+                )
+
+        changed = False
+        # Update the position of each vertex based on the average forces
+        for i, vert in enumerate(verts):
+            new_vert_pos = average_forces[i] * euler_step + vert.co
+            closest_pos, _, _, dist = bvh.find_nearest(new_vert_pos)
+            if closest_pos is None:
+                print("Warning: No closest position found")
+                continue
+            changed |= dist > average_length[i] * convergence_threshold
+            vert.co = closest_pos
+
+        if not changed:
+            break
 
 
 def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
@@ -393,7 +403,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
                 else get_unique_verts(mid_vert.link_faces)
             )
 
-        smooth_mesh(smooth_verts)
+        smooth_mesh(smooth_verts, relax_iter=10)
 
         print(f"-- Iteration {mesh_iteration} done --")
         print(f"-> Total faces = {len(mesh.faces)}")
@@ -449,7 +459,7 @@ if __name__ == "__main__":
 
     global test_var
     test_var = bm
-    bm = simplify_mesh(bm, 300)
+    bm = simplify_mesh(bm, 400)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
