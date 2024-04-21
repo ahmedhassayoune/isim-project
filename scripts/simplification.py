@@ -195,7 +195,7 @@ def collapse_diagonal(mesh: bmesh.types.BMesh, face: bmesh.types.BMFace):
         proj_mid_vert = hit_pos_opp
 
     # Project mid-vertex on the hit position
-    bmesh.ops.pointmerge(mesh, verts=[mid_vert], merge_co=proj_mid_vert)
+    mid_vert.co = proj_mid_vert
     return mid_vert
 
 
@@ -273,15 +273,31 @@ def get_unique_verts(faces: list[bmesh.types.BMFace]) -> list[bmesh.types.BMVert
     return verts
 
 
-def compute_stats(mesh: bmesh.types.BMesh):
-    """Compute stats of the given mesh."""
-    mesh_faces = len(mesh.faces)
-    heap_faces = 0
-    for _, _, _, face in heap._data:
-        if face.is_valid:
-            heap_faces += 1
+def smooth_mesh(verts: list[bmesh.types.BMVert]):
+    """Smooth the local zone of the given vertices."""
+    euler_step = 0.1
 
-    return mesh_faces - heap_faces + 1
+    average_length = np.zeros(len(verts), dtype=float)
+    average_forces = np.array([Vector((0.0, 0.0, 0.0))] * len(verts))
+    for i, vert in enumerate(verts):
+        # Compute the average length of the edges of each vertex
+        average_length[i] = np.mean([edge.calc_length() for edge in vert.link_edges])
+
+        # Compute the average forces of each vertex based on the average length
+        for edge in vert.link_edges:
+            other = edge.other_vert(vert)
+            force_vec = vert.co - other.co
+            average_forces[i] += force_vec.normalized() * (
+                average_length[i] - force_vec.length
+            )
+
+    # Update the position of each vertex based on the average forces
+    for i, vert in enumerate(verts):
+        new_vert_pos = average_forces[i] * euler_step + vert.co
+        closest_pos, _, _, dist = bvh.find_nearest(new_vert_pos)
+        if closest_pos is None:
+            continue
+        vert.co = closest_pos
 
 
 def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
@@ -361,9 +377,23 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
             push_updated_faces(rotated_edge.link_faces)
 
             verts = get_unique_verts(rotated_edge.link_faces)
-            clean_local_zone(mesh, verts)
+            cface = clean_local_zone(mesh, verts)
 
         # -- Smoothing: Tangent space smoothing --
+        if rotated_edge:
+            smooth_verts = (
+                cface.verts
+                if cface and cface.is_valid
+                else get_unique_verts(rotated_edge.link_faces)
+            )
+        else:
+            smooth_verts = (
+                cface.verts
+                if cface and cface.is_valid
+                else get_unique_verts(mid_vert.link_faces)
+            )
+
+        smooth_mesh(smooth_verts)
 
         print(f"-- Iteration {mesh_iteration} done --")
         print(f"-> Total faces = {len(mesh.faces)}")
@@ -419,7 +449,7 @@ if __name__ == "__main__":
 
     global test_var
     test_var = bm
-    bm = simplify_mesh(bm, 100)
+    bm = simplify_mesh(bm, 300)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
