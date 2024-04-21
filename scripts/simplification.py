@@ -25,11 +25,12 @@ class MyHeap(object):
             self.index = len(self._data)
             heapq.heapify(self._data)
 
-    def push(self, item):
+    def push(self, item: bmesh.types.BMFace):
         # if len(item.verts) != 4:  # FIXME: Should not happen
         #     return None
         if item[uid_layer] == 0:  # New item
             elem_uuid = uuid4().bytes
+            item[uid_layer] = elem_uuid
             heap_elem = (self.key(item), self.index, elem_uuid, item)
             heap_elem_occ[elem_uuid] = 1
         else:
@@ -150,7 +151,7 @@ def clean_local_zone(mesh: bmesh.types.BMesh, verts: list[bmesh.types.BMVert]):
 def push_updated_faces(faces: list[bmesh.types.BMesh], out_index=None):
     """Push updated faces to the heap except the one with the given index."""
     for face in faces:
-        if face.index == out_index:
+        if out_index and face.index == out_index:
             continue
         heap.push(face)
 
@@ -237,6 +238,10 @@ def rotate_edges(mesh: bmesh.types.BMesh, edges: list):
             if ccw_edge:
                 edge = bmesh.ops.rotate_edges(mesh, edges=[ccw_edge[0]], use_ccw=False)
                 edge = edge["edges"][0]
+
+            push_updated_faces(
+                edge.link_faces
+            )  # reupdate faces even if no rotation is done
             continue
 
         if min(cw_energy, ccw_energy) == cw_energy:
@@ -414,7 +419,7 @@ if __name__ == "__main__":
 
     global test_var
     test_var = bm
-    bm = simplify_mesh(bm, 10)
+    bm = simplify_mesh(bm, 100)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
