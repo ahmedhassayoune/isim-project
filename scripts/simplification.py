@@ -103,7 +103,10 @@ def remove_doublet(mesh: bmesh.types.BMesh, vert: bmesh.types.BMVert):
 
     # Dissolve linked faces
     region = bmesh.ops.dissolve_faces(mesh, faces=vert.link_faces, use_verts=True)
-    face = region["region"][0]
+    face = region["region"]
+    if not face:
+        return None
+    face = face[0]
     heap.push(face)
 
     return face
@@ -207,41 +210,46 @@ def compute_energy(edge: bmesh.types.BMEdge) -> float:
 
 def rotate_edges(mesh: bmesh.types.BMesh, edges: list):
     """Rotate the edges of the given list to minimize the energy."""
-    for edge in edges:
+    for i in range(len(edges)):
+        edge = edges[i]
         if len(edge.link_faces) != 2:
             continue
 
         base_energy = compute_energy(edge)
         # Rotate edge in clockwise direction + compute energy
         cw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=False)
-        cw_edge = cw_edge["edges"][0]
-        cw_energy = compute_energy(cw_edge)
+        cw_edge = cw_edge["edges"]
+        cw_energy = compute_energy(cw_edge[0]) if cw_edge else float("inf")
 
-        # Revert rotation
-        edge = bmesh.ops.rotate_edges(mesh, edges=[cw_edge], use_ccw=True)
-        edge = edge["edges"][0]
+        # Revert rotation to initial state
+        if cw_edge:
+            edge = bmesh.ops.rotate_edges(mesh, edges=[cw_edge[0]], use_ccw=True)
+            edge = edge["edges"][0]
 
         # Rotate edge in counter-clockwise direction + compute energy
         ccw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=True)
-        ccw_edge = ccw_edge["edges"][0]
-        ccw_energy = compute_energy(ccw_edge)
+        ccw_edge = ccw_edge["edges"]
+        ccw_energy = compute_energy(ccw_edge[0]) if ccw_edge else float("inf")
 
         if min(base_energy, cw_energy, ccw_energy) == base_energy:
-            # Revert to initial state
-            bmesh.ops.rotate_edges(mesh, edges=[ccw_edge], use_ccw=False)
+            # Revert rotation to initial state
+            if ccw_edge:
+                edge = bmesh.ops.rotate_edges(mesh, edges=[ccw_edge[0]], use_ccw=False)
+                edge = edge["edges"][0]
             continue
 
         if min(cw_energy, ccw_energy) == cw_energy:
-            # Revert to other rotation
-            edge = bmesh.ops.rotate_edges(mesh, edges=[ccw_edge], use_ccw=False)
-            edge = edge["edges"][0]
+            # Revert rotation to initial state
+            if ccw_edge:
+                edge = bmesh.ops.rotate_edges(mesh, edges=[ccw_edge[0]], use_ccw=False)
+                edge = edge["edges"][0]
 
             cw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=False)
             cw_edge = cw_edge["edges"][0]
 
             return cw_edge
 
-        return ccw_edge
+        return ccw_edge[0]
 
     return None
 
@@ -359,7 +367,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
 
         mesh_iteration += 1
 
-    print("--- # Simplification DONE # ---")
+    print("\n--- # Simplification DONE # ---")
     print(f"Final number of faces: {len(mesh.faces)}")
     print(f"Heap size: {len(heap._data)}")
     print(f"Total iterations: {mesh_iteration}")
@@ -405,8 +413,9 @@ if __name__ == "__main__":
 
     global test_var
     test_var = bm
-    bm = simplify_mesh(bm, 350)
+    bm = simplify_mesh(bm, 30)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
     bm.free()  # free and prevent further access
+    me.update()
