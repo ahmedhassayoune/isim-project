@@ -98,7 +98,7 @@ def get_neighbor_vert_from_pos(
 
 def remove_doublet(mesh: bmesh.types.BMesh, vert: bmesh.types.BMVert):
     """Remove a single doublet."""
-    if len(vert.link_faces) != 2:
+    if len(vert.link_edges) != 2:
         return None
 
     # Dissolve linked faces
@@ -140,7 +140,8 @@ def clean_local_zone(mesh: bmesh.types.BMesh, verts: list[bmesh.types.BMVert]):
     if not face:
         return None
 
-    # Remove potiential generated singlets
+    # Remove potiential generated singlets or other degenerates
+    # e.g. edges w/o length, faces w/o area ...
     bmesh.ops.dissolve_degenerate(mesh, edges=face.edges)
 
     return face
@@ -330,7 +331,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         if occ is None:  # <-- Should not happen
             debug_here(mesh, [face])
 
-        if occ >= 1 and min_diag != compute_min_diagonal_length(face):
+        if occ > 1 and min_diag != compute_min_diagonal_length(face):
             total_outdated_faces += 1
             continue
 
@@ -413,7 +414,7 @@ if __name__ == "__main__":
 
     global test_var
     test_var = bm
-    bm = simplify_mesh(bm, 30)
+    bm = simplify_mesh(bm, 10)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
