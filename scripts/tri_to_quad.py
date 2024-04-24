@@ -86,7 +86,7 @@ def squareness(edge: bmesh.types.BMEdge) -> float:
     of the theoric face that would result if the parameter edge was dissolved.
     """
     if edge.is_boundary:
-        return 3 # Bigger than the maximum possible squareness
+        return float('inf') # Bigger than the maximum possible squareness
     
     # Get the 4 vertices of the theoric face in the right order
     _, vertices = merge(edge.link_faces[0], edge.link_faces[1])
