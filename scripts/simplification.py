@@ -55,7 +55,8 @@ def distance_vec(point1: Vector, point2: Vector) -> float:
 def compute_min_diagonal_length(face: bmesh.types.BMFace) -> float:
     """Compute the minimum diagonal length of the given quad face."""
     if len(face.verts) != 4:
-        print("Warning: Face is not a quad")
+        if verbose:
+            print("Warning: Face is not a quad")
         return float("inf")
     v1, v2, v3, v4 = face.verts
     diag1_len = distance_vec(v1.co, v3.co)
@@ -93,7 +94,8 @@ def get_neighbor_vert_from_pos(
             return other_vert
         if (dist := distance_vec(other_vert.co, pos)) < min_dist:
             min_dist, min_vert = dist, other_vert
-    print("Warning: No exact neighbor found")
+    if verbose:
+        print("Warning: No exact neighbor found")
     return min_vert
 
 
@@ -181,7 +183,8 @@ def collapse_diagonal(mesh: bmesh.types.BMesh, face: bmesh.types.BMFace):
 
     # Handle case where no hit position is found
     if not hit_pos and not hit_pos_opp:
-        print("Warning: No hit position or normal")
+        if verbose:
+            print("Warning: No hit position or normal")
         return mid_vert
 
     if dist is None:
@@ -301,7 +304,8 @@ def smooth_mesh(verts: list[bmesh.types.BMVert], relax_iter: int = 10):
             new_vert_pos = average_forces[i] * euler_step + vert.co
             closest_pos, _, _, dist = bvh.find_nearest(new_vert_pos)
             if closest_pos is None:
-                print("Warning: No closest position found")
+                if verbose:
+                    print("Warning: No closest position found")
                 continue
             changed |= dist > average_length[i] * convergence_threshold
             vert.co = closest_pos
@@ -405,11 +409,14 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
 
         smooth_mesh(smooth_verts, relax_iter=10)
 
-        print(f"-- Iteration {mesh_iteration} done --")
-        print(f"-> Total faces = {len(mesh.faces)}")
-        print(f"-> Total removed faces = {initial_mesh_faces - len(mesh.faces)}")
-        print(f"-> Total removed faces (in iter) = {iteration_faces - len(mesh.faces)}")
-        print(f"-> Heap size = {len(heap._data)}")
+        if verbose or mesh_iteration % 100 == 0:
+            print(f"-- Iteration {mesh_iteration} done --")
+            print(f"-> Total faces = {len(mesh.faces)}")
+            print(f"-> Total removed faces = {initial_mesh_faces - len(mesh.faces)}")
+            print(
+                f"-> Total removed faces (in iter) = {iteration_faces - len(mesh.faces)}"
+            )
+            print(f"-> Heap size = {len(heap._data)}")
 
         mesh_iteration += 1
 
@@ -419,6 +426,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
     print(f"Total iterations: {mesh_iteration}")
     print()
     print("--- # Stats # ---")
+    print(f"Total removed faces: {initial_mesh_faces - len(mesh.faces)}")
     print(f"Total invalid faces: {total_invalid_faces}")
     print(f"Total outdated faces: {total_outdated_faces}")
     print(f"Total non-quad faces: {total_non_quad_faces}")
@@ -450,6 +458,9 @@ def debug_here(
 
 
 if __name__ == "__main__":
+    global verbose
+    verbose = False
+
     # Get the active mesh
     me = bpy.context.object.data
 
@@ -457,11 +468,10 @@ if __name__ == "__main__":
     bm = bmesh.new()  # create an empty BMesh
     bm.from_mesh(me)  # fill it in from a Mesh
 
-    global test_var
-    test_var = bm
-    bm = simplify_mesh(bm, 400)
+    bm = simplify_mesh(bm, 5000)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
     bm.free()  # free and prevent further access
+
     me.update()
