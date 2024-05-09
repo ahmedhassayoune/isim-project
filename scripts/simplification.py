@@ -7,7 +7,6 @@ import bmesh
 import bpy
 import numpy as np
 from mathutils import Vector, bvhtree
-from scipy.optimize import curve_fit
 
 
 class MyHeap(object):
@@ -459,6 +458,28 @@ def get_neighbors_from_radius(vert: bmesh.types.BMVert, radius: float) -> list:
     return neighbors
 
 
+def get_faces_neighbors_from_verts(
+    vert: bmesh.types.BMVert, verts_neighbors: list, radius: float
+) -> list:
+    """Get the faces neighbors of the given vertex within the given radius."""
+    visited = set()
+    neighbor_faces = []
+    for nvert in verts_neighbors:
+        faces = nvert.link_faces
+        for face in faces:
+            if face.index in visited:
+                continue
+            for fvert in face.verts:
+                if distance_vec(vert.co, fvert.co) > radius:
+                    visited.add(face.index)
+                    break
+            if face.index not in visited:
+                neighbor_faces.append(face)
+                visited.add(face.index)
+
+    return neighbor_faces
+
+
 def compute_radius_error(neighbors: list, vert: bmesh.types.BMVert) -> float:
     assert len(neighbors) >= 5
 
@@ -487,10 +508,74 @@ def compute_radius_error(neighbors: list, vert: bmesh.types.BMVert) -> float:
     return residual
 
 
-def compute_sfitmap(bm: bmesh.types.BMesh, dimensions: Vector) -> np.ndarray:
-    """Compute the scale fitmap for the given BMesh object."""
+def compute_sfitmap(vert: bmesh.types.BMVert, radii: np.ndarray):
+    """Compute the Scale fitmap for the given vertex."""
+    radii_errors = []
+    for radius in radii:
+        neighbors_at_radius = get_neighbors_from_radius(vert, radius)
+        if len(neighbors_at_radius) >= 5:
+            radius_error = compute_radius_error(neighbors_at_radius, vert)
+            radii_errors.append(radius_error)
+        else:
+            radii_errors.append(0)
+    # fit ax^2
+    A = np.square(radii).T
+    b = np.array(radii_errors).T
+
+    coefs = np.linalg.lstsq(A, b, rcond=None)[0]
+    a = coefs[0]
+
     global sfitmap_layer
+    vert[sfitmap_layer] = np.sqrt(a)
+
+
+def compute_mfitmap(vert: bmesh.types.BMVert, radii: np.ndarray, threshold=0.05):
+    """Compute the Maximal radius fitmap for the given vertex."""
+    for radius in radii:
+        # -- Fit a plane on the neighbors
+        neighbors = get_neighbors_from_radius(vert, radius)
+        points = np.array([neighbor.co for neighbor in neighbors] + [vert.co])
+
+        # Center the neighbors
+        centroid = np.mean(points, axis=0)
+        centered_points = points - centroid
+
+        # Compute covariance matrix relative to the centroid
+        cov = np.cov(centered_points.T)
+
+        # Compute eigenvalues and eigenvectors
+        eval, evec = np.linalg.eig(cov)
+
+        # Get the normal of the plane
+        plane_normal = evec[:, np.argmin(eval)]
+        plane_normal = Vector(plane_normal).normalized()
+
+        consistent_faces = 0
+        inconsistent_faces = 0
+        face_neighbors = get_faces_neighbors_from_verts(vert, neighbors, radius)
+        for fneighbor in face_neighbors:
+            face_normal = fneighbor.normal.normalized()
+            scalar = plane_normal.dot(face_normal)
+            if scalar >= 0:
+                consistent_faces += fneighbor.calc_area()
+            else:
+                inconsistent_faces += fneighbor.calc_area()
+
+        if consistent_faces + inconsistent_faces == 0:
+            continue
+        proportion = inconsistent_faces / (consistent_faces + inconsistent_faces)
+        if proportion >= threshold:
+            break
+
+        global mfitmap_layer
+        vert[mfitmap_layer] = radius
+
+
+def compute_fitmaps(bm: bmesh.types.BMesh, dimensions: Vector) -> np.ndarray:
+    """Compute the Scale and Maximal radius fitmaps for the given mesh."""
+    global sfitmap_layer, mfitmap_layer
     sfitmap_layer = bm.verts.layers.float.new("sfitmap")
+    mfitmap_layer = bm.verts.layers.float.new("mfitmap")
 
     avg_edges_length = np.mean([edge.calc_length() for edge in bm.edges])
     bounding_box_diag = dimensions.length
@@ -501,18 +586,8 @@ def compute_sfitmap(bm: bmesh.types.BMesh, dimensions: Vector) -> np.ndarray:
     radii = r0 * np.exp(np.linspace(0, 1, max_radii) * np.log(rh / r0))
 
     for vert in bm.verts:
-        radii_errors = []
-        for radius in radii:
-            neighbors_at_radius = get_neighbors_from_radius(vert, radius)
-            if len(neighbors_at_radius) >= 5:
-                radius_error = compute_radius_error(neighbors_at_radius, vert)
-                radii_errors.append(radius_error)
-            else:
-                radii_errors.append(0)
-        # fit ax^2
-        popt, _ = curve_fit(lambda r, a: a * r**2, radii, radii_errors)
-        a = popt[0]
-        vert[sfitmap_layer] = np.sqrt(a)
+        compute_sfitmap(vert, radii)
+        compute_mfitmap(vert, radii)
 
 
 def debug_here(
@@ -549,10 +624,8 @@ if __name__ == "__main__":
     bm = bmesh.new()  # create an empty BMesh
     bm.from_mesh(me)  # fill it in from a Mesh
 
-    # Preprocessing - Compute the Scale fitmap
-    compute_sfitmap(bm.copy(), me.dimensions)
-
-    # Preprocessing - Compute the Maximal radius fitmap
+    # Preprocessing - Compute the Scale and Maximal radius fitmaps
+    compute_fitmaps(bm.copy(), me.dimensions)
 
     bm = simplify_mesh(bm, 5000)
 
