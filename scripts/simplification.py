@@ -16,6 +16,7 @@ class MyHeap(object):
         self.key = key
         self.index = 0
         self._data = []
+        global uid_layer
         if initial:
             for i, item in enumerate(initial):
                 elem_uuid = uuid4().bytes
@@ -29,6 +30,7 @@ class MyHeap(object):
     def push(self, item: bmesh.types.BMFace):
         # if len(item.verts) != 4:  # FIXME: Should not happen
         #     return None
+        global uid_layer
         if item[uid_layer] == 0:  # New item
             elem_uuid = uuid4().bytes
             item[uid_layer] = elem_uuid
@@ -65,10 +67,95 @@ def compute_min_diagonal_length(face: bmesh.types.BMFace) -> float:
     return min(diag1_len, diag2_len)
 
 
-def build_bvh_tree(mesh: bmesh.types.BMesh):
+def compute_barycentric_coordinates(triangle_vertices, point):
+    """
+    Compute the barycentric coordinates of a point inside a triangle.
+
+    Parameters:
+        triangle_vertices (list of numpy arrays): Vertices of the triangle.
+        point (numpy array): Coordinates of the point.
+
+    Returns:
+        tuple of floats: Barycentric coordinates of the point.
+    """
+    # Convert input to numpy arrays
+    triangle_vertices = np.array(triangle_vertices)
+    point = np.array(point)
+
+    # Compute the vectors from the first vertex of the triangle to the other vertices
+    v0 = triangle_vertices[1] - triangle_vertices[0]
+    v1 = triangle_vertices[2] - triangle_vertices[0]
+    v2 = point - triangle_vertices[0]
+
+    # Compute dot products
+    dot00 = np.dot(v0, v0)
+    dot01 = np.dot(v0, v1)
+    dot11 = np.dot(v1, v1)
+    dot20 = np.dot(v2, v0)
+    dot21 = np.dot(v2, v1)
+
+    # Compute barycentric coordinates
+    inv_denom = 1 / (dot00 * dot11 - dot01 * dot01)
+    alpha = (dot11 * dot20 - dot01 * dot21) * inv_denom
+    beta = (dot00 * dot21 - dot01 * dot20) * inv_denom
+    gamma = 1 - alpha - beta
+
+    return alpha, beta, gamma
+
+
+def compute_priority(face: bmesh.types.BMFace) -> float:
+    """Compute the priority of the given face."""
+    if len(face.verts) != 4:
+        if verbose:
+            print("Warning: Face is not a quad")
+        return float("inf")
+    v1, v2, v3, v4 = face.verts
+    diag1_len = distance_vec(v1.co, v3.co)
+    diag2_len = distance_vec(v2.co, v4.co)
+
+    # Compute the center point of the shortest diagonal
+    global bvh, initial_mesh
+    if diag1_len < diag2_len:
+        diag_len = diag1_len
+        center = (v1.co + v3.co) / 2
+    else:
+        diag_len = diag2_len
+        center = (v2.co + v4.co) / 2
+
+    # Fetch projected point and associated face on the source mesh M0
+    projected, _, face_idx, _ = bvh.ray_cast(center, face.normal.normalized())
+    initial_mesh.faces.ensure_lookup_table()
+    target_face = initial_mesh.faces[face_idx]
+    if len(target_face.verts) != 4:
+        if verbose:
+            print("Warning: Face is not a quad")
+
+    # Get the 3 closest vertices to projected point
+    closest_verts = sorted(
+        target_face.verts,
+        key=lambda v: distance_vec(v.co, projected),
+    )[:3]
+
+    # Compute sfitmap interpolation based on barycentric coordinates
+    alpha, beta, gamma = compute_barycentric_coordinates(
+        [v.co for v in target_face.verts],
+        projected,
+    )
+
+    global sfitmap_layer
+    interpolated_sfitmap = (
+        alpha * closest_verts[0][sfitmap_layer]
+        + beta * closest_verts[1][sfitmap_layer]
+        + gamma * closest_verts[2][sfitmap_layer]
+    )
+
+    return diag_len * interpolated_sfitmap
+
+
+def build_bvh_tree():
     """Build a BVH tree for the given mesh."""
-    global bvh
-    bvh = bvhtree.BVHTree.FromBMesh(mesh.copy())
+    global bvh, initial_mesh
+    bvh = bvhtree.BVHTree.FromBMesh(initial_mesh)
 
 
 def build_mesh_heap(mesh: bmesh.types.BMesh) -> list:
@@ -81,7 +168,7 @@ def build_mesh_heap(mesh: bmesh.types.BMesh) -> list:
 
     global heap
     faces = list(mesh.faces)
-    heap = MyHeap(initial=faces, key=lambda face: compute_min_diagonal_length(face))
+    heap = MyHeap(initial=faces, key=lambda face: compute_priority(face))
 
 
 def get_neighbor_vert_from_pos(
@@ -340,7 +427,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
     """
 
     # Initialize bvh tree of input mesh for spatial queries
-    build_bvh_tree(mesh)
+    build_bvh_tree()
 
     # Initialize the heap with the faces of the input mesh
     build_mesh_heap(mesh)
@@ -571,13 +658,13 @@ def compute_mfitmap(vert: bmesh.types.BMVert, radii: np.ndarray, threshold=0.05)
         vert[mfitmap_layer] = radius
 
 
-def compute_fitmaps(bm: bmesh.types.BMesh, dimensions: Vector) -> np.ndarray:
+def compute_fitmaps(dimensions: Vector) -> np.ndarray:
     """Compute the Scale and Maximal radius fitmaps for the given mesh."""
-    global sfitmap_layer, mfitmap_layer
-    sfitmap_layer = bm.verts.layers.float.new("sfitmap")
-    mfitmap_layer = bm.verts.layers.float.new("mfitmap")
+    global initial_mesh, sfitmap_layer, mfitmap_layer
+    sfitmap_layer = initial_mesh.verts.layers.float.new("sfitmap")
+    mfitmap_layer = initial_mesh.verts.layers.float.new("mfitmap")
 
-    avg_edges_length = np.mean([edge.calc_length() for edge in bm.edges])
+    avg_edges_length = np.mean([edge.calc_length() for edge in initial_mesh.edges])
     bounding_box_diag = dimensions.length
     max_radii = 9
 
@@ -585,7 +672,7 @@ def compute_fitmaps(bm: bmesh.types.BMesh, dimensions: Vector) -> np.ndarray:
     rh = 0.25 * bounding_box_diag
     radii = r0 * np.exp(np.linspace(0, 1, max_radii) * np.log(rh / r0))
 
-    for vert in bm.verts:
+    for vert in initial_mesh.verts:
         compute_sfitmap(vert, radii)
         compute_mfitmap(vert, radii)
 
@@ -625,7 +712,9 @@ if __name__ == "__main__":
     bm.from_mesh(me)  # fill it in from a Mesh
 
     # Preprocessing - Compute the Scale and Maximal radius fitmaps
-    compute_fitmaps(bm.copy(), me.dimensions)
+    global initial_mesh
+    initial_mesh = bm.copy()
+    compute_fitmaps(me.dimensions)
 
     bm = simplify_mesh(bm, 5000)
 
