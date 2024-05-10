@@ -28,7 +28,7 @@ class MyHeap(object):
             heapq.heapify(self._data)
 
     def push(self, item: bmesh.types.BMFace):
-        # if len(item.verts) != 4:  # FIXME: Should not happen
+        # if len(item.verts) != 4:  # TODO: Should not happen
         #     return None
         global uid_layer
         if item[uid_layer] == 0:  # New item
@@ -96,39 +96,44 @@ def compute_barycentric_coordinates(triangle_vertices, point):
 
     # Compute barycentric coordinates
     inv_denom = 1 / (dot00 * dot11 - dot01 * dot01)
-    alpha = (dot11 * dot20 - dot01 * dot21) * inv_denom
-    beta = (dot00 * dot21 - dot01 * dot20) * inv_denom
-    gamma = 1 - alpha - beta
+    alpha = np.clip((dot11 * dot20 - dot01 * dot21) * inv_denom, 0.0, 1.0)
+    beta = np.clip((dot00 * dot21 - dot01 * dot20) * inv_denom, 0.0, 1.0)
+    gamma = np.clip(1.0 - alpha - beta, 0.0, 1.0)
 
+    if not np.isclose(alpha + beta + gamma, 1, atol=1e-4):
+        print(f"Alpha={alpha}, Beta={beta}, Gamma={gamma}")
     return alpha, beta, gamma
 
 
-def compute_priority(face: bmesh.types.BMFace) -> float:
-    """Compute the priority of the given face."""
-    if len(face.verts) != 4:
-        if verbose:
-            print("Warning: Face is not a quad")
-        return float("inf")
-    v1, v2, v3, v4 = face.verts
-    diag1_len = distance_vec(v1.co, v3.co)
-    diag2_len = distance_vec(v2.co, v4.co)
+def interpolate_fitmap(face: bmesh.types.BMFace, point: Vector, fitmap_layer: str):
+    """Interpolate the fitmap value of the given face at the given point."""
+    # Fetch projected point and associated face on the source mesh M0 by casting 2 opposite rays
+    global bvh
+    projected, _, face_idx, dist = bvh.ray_cast(point, face.normal.normalized())
+    projected_opp, _, face_idx_opp, dist_opp = (
+        bvh.ray_cast(  # TODO: pas sur sur les directions
+            point, -face.normal.normalized()
+        )
+    )
 
-    # Compute the center point of the shortest diagonal
-    global bvh, initial_mesh
-    if diag1_len < diag2_len:
-        diag_len = diag1_len
-        center = (v1.co + v3.co) / 2
-    else:
-        diag_len = diag2_len
-        center = (v2.co + v4.co) / 2
+    # Handle case where no hit position is found
+    if not projected and not projected_opp:
+        raise Exception("Warning: No hit position or normal")
 
-    # Fetch projected point and associated face on the source mesh M0
-    projected, _, face_idx, _ = bvh.ray_cast(center, face.normal.normalized())
+    if dist is None:
+        dist = float("inf")
+    if dist_opp is None:
+        dist_opp = float("inf")
+    # Get the closest hit position to the mid-vertex
+    if dist_opp < dist:
+        projected = projected_opp
+        face_idx = face_idx_opp
+
+    global initial_mesh, verbose
     initial_mesh.faces.ensure_lookup_table()
     target_face = initial_mesh.faces[face_idx]
-    if len(target_face.verts) != 4:
-        if verbose:
-            print("Warning: Face is not a quad")
+    if verbose and len(target_face.verts) != 4:
+        print("Warning: Face is not a quad")
 
     # Get the 3 closest vertices to projected point
     closest_verts = sorted(
@@ -138,16 +143,38 @@ def compute_priority(face: bmesh.types.BMFace) -> float:
 
     # Compute sfitmap interpolation based on barycentric coordinates
     alpha, beta, gamma = compute_barycentric_coordinates(
-        [v.co for v in target_face.verts],
+        [v.co for v in closest_verts],
         projected,
     )
 
-    global sfitmap_layer
-    interpolated_sfitmap = (
-        alpha * closest_verts[0][sfitmap_layer]
-        + beta * closest_verts[1][sfitmap_layer]
-        + gamma * closest_verts[2][sfitmap_layer]
+    interpolated_fitmap = (
+        alpha * closest_verts[0][fitmap_layer]
+        + beta * closest_verts[1][fitmap_layer]
+        + gamma * closest_verts[2][fitmap_layer]
     )
+    return interpolated_fitmap
+
+
+def compute_priority(face: bmesh.types.BMFace) -> float:
+    """Compute the priority of the given face."""
+    if len(face.verts) != 4:  # TODO: is this condition necessary in all code
+        if verbose:
+            print("Warning: Face is not a quad")
+        return float("inf")
+    v1, v2, v3, v4 = face.verts
+    diag1_len = distance_vec(v1.co, v3.co)
+    diag2_len = distance_vec(v2.co, v4.co)
+
+    # Compute the center point of the shortest diagonal
+    if diag1_len < diag2_len:
+        diag_len = diag1_len
+        center = (v1.co + v3.co) / 2
+    else:
+        diag_len = diag2_len
+        center = (v2.co + v4.co) / 2
+
+    global sfitmap_layer
+    interpolated_sfitmap = interpolate_fitmap(face, center, sfitmap_layer)
 
     return diag_len * interpolated_sfitmap
 
@@ -244,6 +271,26 @@ def push_updated_faces(faces: list[bmesh.types.BMesh], out_index=None):
         if out_index and face.index == out_index:
             continue
         heap.push(face)
+
+
+def allow_collapse(face: bmesh.types.BMFace) -> bool:
+    """Check if the given face is allowed to collapse based on M-Fitmap on surrounding faces"""
+    surrounding_faces = []
+    for edge in face.edges:
+        for f in edge.link_faces:
+            if f.index != face.index:
+                surrounding_faces.append(f)
+
+    for sface in surrounding_faces:
+        center = sface.calc_center_median()
+        radius = max([distance_vec(center, v.co) for v in sface.verts])
+
+        global mfitmap_layer
+        interpolated_mfitmap = interpolate_fitmap(face, center, mfitmap_layer)
+
+        if radius > interpolated_mfitmap:
+            return False
+    return True
 
 
 def collapse_diagonal(mesh: bmesh.types.BMesh, face: bmesh.types.BMFace):
@@ -450,6 +497,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
             total_invalid_faces += 1
             continue
 
+        global heap_elem_occ
         occ = heap_elem_occ[uid]
         if occ is None:  # <-- Should not happen
             debug_here(mesh, [face])
@@ -460,6 +508,9 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
 
         if len(face.verts) != 4:
             total_non_quad_faces += 1
+            continue
+
+        if not allow_collapse(face):
             continue
 
         # -- Coarsening: Diagonal collapse --
@@ -568,7 +619,8 @@ def get_faces_neighbors_from_verts(
 
 
 def compute_radius_error(neighbors: list, vert: bmesh.types.BMVert) -> float:
-    assert len(neighbors) >= 5
+    if len(neighbors) < 5:
+        return 0.0
 
     yaxis = Vector((0.0, 1.0, 0.0))
     zaxis = Vector((0.0, 0.0, 1.0))
@@ -578,6 +630,7 @@ def compute_radius_error(neighbors: list, vert: bmesh.types.BMVert) -> float:
     v = normal.cross(u)
     v = v.normalized()
 
+    # TODO: maybe they want plane fit
     A = np.zeros((len(neighbors), 5))
     b = np.zeros(len(neighbors))
 
@@ -603,11 +656,8 @@ def compute_sfitmap(vert: bmesh.types.BMVert, radii: np.ndarray):
         neighbors_at_radius = [
             n for n in max_neighbors if distance_vec(vert.co, n.co) < radius
         ]
-        if len(neighbors_at_radius) >= 5:
-            radius_error = compute_radius_error(neighbors_at_radius, vert)
-            radii_errors.append(radius_error)
-        else:
-            radii_errors.append(0)
+        radius_error = compute_radius_error(neighbors_at_radius, vert)
+        radii_errors.append(radius_error)
     # fit ax^2
     A = np.square(radii).reshape(-1, 1)
     b = np.array(radii_errors)
@@ -617,15 +667,23 @@ def compute_sfitmap(vert: bmesh.types.BMVert, radii: np.ndarray):
 
     global sfitmap_layer
     vert[sfitmap_layer] = np.sqrt(a)
-    print("SFITMAP: ", vert[sfitmap_layer])
 
 
 def compute_mfitmap(vert: bmesh.types.BMVert, radii: np.ndarray, threshold=0.05):
     """Compute the Maximal radius fitmap for the given vertex."""
+    max_neighbors = get_neighbors_from_radius(vert, radii[-1])
     for radius in radii:
         # -- Fit a plane on the neighbors
-        neighbors = get_neighbors_from_radius(vert, radius)
-        points = np.array([neighbor.co for neighbor in neighbors] + [vert.co])
+        neighbors_at_radius = [
+            n for n in max_neighbors if distance_vec(vert.co, n.co) < radius
+        ]
+        points = np.array(
+            [v.co for v in neighbors_at_radius] + [vert.co]
+        )  # TODO: should we add vert ?
+
+        # Skip if no neighbors
+        if points.shape[0] == 1:
+            continue
 
         # Center the neighbors
         centroid = np.mean(points, axis=0)
@@ -643,7 +701,9 @@ def compute_mfitmap(vert: bmesh.types.BMVert, radii: np.ndarray, threshold=0.05)
 
         consistent_faces = 0
         inconsistent_faces = 0
-        face_neighbors = get_faces_neighbors_from_verts(vert, neighbors, radius)
+        face_neighbors = get_faces_neighbors_from_verts(
+            vert, neighbors_at_radius, radius
+        )
         for fneighbor in face_neighbors:
             face_normal = fneighbor.normal.normalized()
             scalar = plane_normal.dot(face_normal)
@@ -676,10 +736,13 @@ def compute_fitmaps(dimensions: Vector) -> np.ndarray:
     rh = 0.25 * bounding_box_diag
     radii = r0 * np.exp(np.linspace(0, 1, max_radii) * np.log(rh / r0))
 
+    len_verts = len(initial_mesh.verts)
     for i, vert in enumerate(initial_mesh.verts):
-        print(f"Computing fitmaps for vertex {i} / {len(initial_mesh.verts)}...")
         compute_sfitmap(vert, radii)
-        # compute_mfitmap(vert, radii)
+        compute_mfitmap(vert, radii)
+
+        if verbose or i % 100 == 0:
+            print(f"Computed fitmaps for {i}/{len_verts}")
 
 
 def debug_here(
@@ -722,7 +785,7 @@ if __name__ == "__main__":
     initial_mesh = bm.copy()
     compute_fitmaps(dimensions)
 
-    bm = simplify_mesh(bm, 5000)
+    bm = simplify_mesh(bm, 4000)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
