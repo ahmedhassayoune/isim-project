@@ -1023,6 +1023,12 @@ def visualize_fitmap(sfitmap: bool = True):
     # Get the active mesh
     mesh = bpy.context.object.data
     dimensions = bpy.context.object.dimensions
+    scale = bpy.context.object.scale
+
+    # If the mesh is scaled, normalize the dimensions
+    dimensions = Vector(
+        (dimensions[0] / scale[0], dimensions[1] / scale[1], dimensions[2] / scale[2])
+    )
 
     bpy.ops.object.mode_set(mode="EDIT")
 
@@ -1062,9 +1068,18 @@ if __name__ == "__main__":
     global VERBOSE
     VERBOSE = False
 
+    # visualize_fitmap(sfitmap=True)
+
+    # """
     # Get the active mesh
     me = bpy.context.object.data
     dimensions = bpy.context.object.dimensions
+    scale = bpy.context.object.scale
+
+    # If the mesh is scaled, normalize the dimensions
+    dimensions = Vector(
+        (dimensions[0] / scale[0], dimensions[1] / scale[1], dimensions[2] / scale[2])
+    )
 
     # Get a BMesh representation
     bm = bmesh.new()  # create an empty BMesh
@@ -1082,3 +1097,4 @@ if __name__ == "__main__":
     bm.free()  # free and prevent further access
 
     me.update()
+    # """
