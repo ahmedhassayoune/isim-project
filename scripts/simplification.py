@@ -871,7 +871,7 @@ def get_faces_neighbors_from_verts(
 
 
 def compute_radius_error(neighbors: list, vert: bmesh.types.BMVert) -> float:
-    if len(neighbors) < 5:
+    if len(neighbors) < 16:
         return 0.0
 
     yaxis = Vector((0.0, 1.0, 0.0))
@@ -883,20 +883,44 @@ def compute_radius_error(neighbors: list, vert: bmesh.types.BMVert) -> float:
     v = v.normalized()
 
     # TODO: maybe they want plane fit
-    A = np.zeros((len(neighbors), 5))
+    A = np.zeros((len(neighbors), 16))
     b = np.zeros(len(neighbors))
 
     for i, neighbor in enumerate(neighbors):
         diff = neighbor.co - vert.co
+
+        # Projection on local tangent frame
         x = diff.dot(u)
         y = diff.dot(v)
         z = diff.dot(normal)
 
-        A[i] = np.array([x**2, y**2, x * y, x, y])
+        A[i] = np.array(
+            [
+                x**3 * y**3,
+                x**3 * y**2,
+                x**3 * y,
+                x**3,
+                x**2 * y**3,
+                x**2 * y**2,
+                x**2 * y,
+                x**2,
+                x * y**3,
+                x * y**2,
+                x * y,
+                x,
+                y**3,
+                y**2,
+                y,
+                1,
+            ]
+        )
         b[i] = z
 
+    # Fit a cubic polynomial on tangent frame
     coefs = np.linalg.lstsq(A, b, rcond=None)[0]
-    residual = np.linalg.norm(b - A.dot(coefs)) / len(neighbors)
+
+    # Compute RMS error
+    residual = np.linalg.norm(b - A.dot(coefs)) / np.sqrt(len(neighbors))
     return residual
 
 
@@ -910,14 +934,16 @@ def compute_sfitmap(vert: bmesh.types.BMVert, radii: np.ndarray):
         ]
         radius_error = compute_radius_error(neighbors_at_radius, vert)
         radii_errors.append(radius_error)
-    # fit ax^2
-    A = np.square(radii).reshape(-1, 1)
+        # if vert.index == 0 and radius == radii[-1]:
+        #     debug_here(INITIAL_MESH, neighbors_at_radius)
+    # fit ax^4
+    A = np.power(radii, 4).reshape(-1, 1)
     b = np.array(radii_errors)
 
     coefs = np.linalg.lstsq(A, b, rcond=None)[0]
     a = coefs[0]
 
-    vert[SFITMAP_LAYER] = np.sqrt(a)
+    vert[SFITMAP_LAYER] = np.power(a, 0.25)
 
 
 def compute_mfitmap(vert: bmesh.types.BMVert, radii: np.ndarray, threshold=0.05):
