@@ -998,19 +998,17 @@ def compute_mfitmap(vert: bmesh.types.BMVert, radii: np.ndarray, threshold=0.05)
         vert[MFITMAP_LAYER] = radius
 
 
-def compute_fitmaps(dimensions: Vector) -> np.ndarray:
+def compute_fitmaps():
     """Compute the Scale and Maximal radius fitmaps for the given mesh."""
     global SFITMAP_LAYER, MFITMAP_LAYER
     SFITMAP_LAYER = INITIAL_MESH.verts.layers.float.new("sfitmap")
     MFITMAP_LAYER = INITIAL_MESH.verts.layers.float.new("mfitmap")
 
     avg_edges_length = np.mean([edge.calc_length() for edge in INITIAL_MESH.edges])
-    bounding_box_diag = dimensions.length
-    max_radii = 9
+    max_radii = 5
 
     r0 = avg_edges_length
-    rh = 0.25 * bounding_box_diag
-    radii = r0 * np.exp(np.linspace(0, 1, max_radii) * np.log(rh / r0))
+    radii = np.array([r0 * (1 + i) for i in range(max_radii)])
 
     len_verts = len(INITIAL_MESH.verts)
     for i, vert in enumerate(INITIAL_MESH.verts):
@@ -1048,13 +1046,6 @@ def visualize_fitmap(sfitmap: bool = True):
     """Color the vertices of the given mesh based on the given fitmap layer."""
     # Get the active mesh
     mesh = bpy.context.object.data
-    dimensions = bpy.context.object.dimensions
-    scale = bpy.context.object.scale
-
-    # If the mesh is scaled, normalize the dimensions
-    dimensions = Vector(
-        (dimensions[0] / scale[0], dimensions[1] / scale[1], dimensions[2] / scale[2])
-    )
 
     bpy.ops.object.mode_set(mode="EDIT")
 
@@ -1063,7 +1054,7 @@ def visualize_fitmap(sfitmap: bool = True):
     global INITIAL_MESH
     INITIAL_MESH = bm
 
-    compute_fitmaps(dimensions)
+    compute_fitmaps()
     fitmap_layer = SFITMAP_LAYER if sfitmap else MFITMAP_LAYER
 
     # Get the min and max values of the fitmap
@@ -1099,13 +1090,6 @@ if __name__ == "__main__":
     # """
     # Get the active mesh
     me = bpy.context.object.data
-    dimensions = bpy.context.object.dimensions
-    scale = bpy.context.object.scale
-
-    # If the mesh is scaled, normalize the dimensions
-    dimensions = Vector(
-        (dimensions[0] / scale[0], dimensions[1] / scale[1], dimensions[2] / scale[2])
-    )
 
     # Get a BMesh representation
     bm = bmesh.new()  # create an empty BMesh
@@ -1114,7 +1098,7 @@ if __name__ == "__main__":
     # Preprocessing - Compute the Scale and Maximal radius fitmaps
     global INITIAL_MESH
     INITIAL_MESH = bm.copy()
-    compute_fitmaps(dimensions)
+    compute_fitmaps()
 
     bm = simplify_mesh(bm, 4000)
 
