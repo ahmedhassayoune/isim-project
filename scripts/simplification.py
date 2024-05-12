@@ -324,25 +324,24 @@ def compute_min_diagonal_length(face: bmesh.types.BMFace) -> float:
     return min(diag1_len, diag2_len)
 
 
-def compute_barycentric_coordinates(triangle_vertices, point):
+def compute_barycentric_coordinates(point, triangle) -> bool:
     """
-    Compute the barycentric coordinates of a point inside a triangle.
+    Check if a point is inside a triangle and return the Barycentric Coordinate System.
 
     Parameters:
-        triangle_vertices (list of numpy arrays): Vertices of the triangle.
-        point (numpy array): Coordinates of the point.
+    - point: The point to check.
+    - triangle: List of 3 vertices representing the triangle.
 
     Returns:
-        tuple of floats: Barycentric coordinates of the point.
+    - True if the point is inside the triangle, False otherwise.
     """
-    # Convert input to numpy arrays
-    triangle_vertices = np.array(triangle_vertices)
+    triangle = np.array([v.co for v in triangle])
     point = np.array(point)
 
     # Compute the vectors from the first vertex of the triangle to the other vertices
-    v0 = triangle_vertices[1] - triangle_vertices[0]
-    v1 = triangle_vertices[2] - triangle_vertices[0]
-    v2 = point - triangle_vertices[0]
+    v0 = triangle[1] - triangle[0]
+    v1 = triangle[2] - triangle[0]
+    v2 = point - triangle[0]
 
     # Compute dot products
     dot00 = np.dot(v0, v0)
@@ -353,13 +352,13 @@ def compute_barycentric_coordinates(triangle_vertices, point):
 
     # Compute barycentric coordinates
     inv_denom = 1 / (dot00 * dot11 - dot01 * dot01)
-    alpha = np.clip((dot11 * dot20 - dot01 * dot21) * inv_denom, 0.0, 1.0)
-    beta = np.clip((dot00 * dot21 - dot01 * dot20) * inv_denom, 0.0, 1.0)
-    gamma = np.clip(1.0 - alpha - beta, 0.0, 1.0)
+    alpha = (dot11 * dot20 - dot01 * dot21) * inv_denom
+    beta = (dot00 * dot21 - dot01 * dot20) * inv_denom
+    gamma = 1 - alpha - beta
 
-    if not np.isclose(alpha + beta + gamma, 1, atol=1e-4):
-        print(f"Alpha={alpha}, Beta={beta}, Gamma={gamma}")
-    return alpha, beta, gamma
+    inside = (alpha >= 0) and (beta >= 0) and (alpha + beta <= 1)
+
+    return inside, alpha, beta, gamma
 
 
 def interpolate_fitmap(face: bmesh.types.BMFace, point: Vector, fitmap_layer: str):
@@ -388,26 +387,47 @@ def interpolate_fitmap(face: bmesh.types.BMFace, point: Vector, fitmap_layer: st
     INITIAL_MESH.faces.ensure_lookup_table()
     target_face = INITIAL_MESH.faces[face_idx]
     if VERBOSE and len(target_face.verts) != 4:
-        print("Warning: Face is not a quad")
+        raise Exception("Warning: Face is not a quad")
 
-    # Get the 3 closest vertices to projected point
-    closest_verts = sorted(
-        target_face.verts,
-        key=lambda v: distance_vec(v.co, projected),
-    )[:3]
+    tri_ABC = [
+        target_face.verts[0],
+        target_face.verts[1],
+        target_face.verts[2],
+    ]
+    tri_ACD = [
+        target_face.verts[0],
+        target_face.verts[2],
+        target_face.verts[3],
+    ]
+    tri_ABD = [
+        target_face.verts[0],
+        target_face.verts[1],
+        target_face.verts[3],
+    ]
+    tri_BCD = [
+        target_face.verts[1],
+        target_face.verts[2],
+        target_face.verts[3],
+    ]
+    triangles = [tri_ABC, tri_ACD, tri_ABD, tri_BCD]
 
-    # Compute sfitmap interpolation based on barycentric coordinates
-    alpha, beta, gamma = compute_barycentric_coordinates(
-        [v.co for v in closest_verts],
-        projected,
+    for triangle in triangles:
+        inside, alpha, beta, gamma = compute_barycentric_coordinates(
+            projected, triangle
+        )
+        if inside:
+            return (
+                alpha * triangle[0][fitmap_layer]
+                + beta * triangle[1][fitmap_layer]
+                + gamma * triangle[2][fitmap_layer]
+            )
+
+    # Return last triangle in any case <-- Not reached normalement
+    return (
+        alpha * triangles[-1][0][fitmap_layer]
+        + beta * triangles[-1][1][fitmap_layer]
+        + gamma * triangles[-1][2][fitmap_layer]
     )
-
-    interpolated_fitmap = (
-        alpha * closest_verts[0][fitmap_layer]
-        + beta * closest_verts[1][fitmap_layer]
-        + gamma * closest_verts[2][fitmap_layer]
-    )
-    return interpolated_fitmap
 
 
 def compute_priority(face: bmesh.types.BMFace) -> float:
@@ -541,7 +561,7 @@ def allow_collapse(face: bmesh.types.BMFace) -> bool:
 
         interpolated_mfitmap = interpolate_fitmap(face, center, MFITMAP_LAYER)
 
-        if radius > interpolated_mfitmap:
+        if radius >= interpolated_mfitmap:
             return False
     return True
 
@@ -1079,7 +1099,7 @@ if __name__ == "__main__":
     INITIAL_MESH = bm.copy()
     compute_fitmaps()
 
-    bm = simplify_mesh(bm, 4000)
+    bm = simplify_mesh(bm, 1000)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
