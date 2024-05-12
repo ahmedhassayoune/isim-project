@@ -950,31 +950,10 @@ def compute_mfitmap(vert: bmesh.types.BMVert, radii: np.ndarray, threshold=0.05)
     """Compute the Maximal radius fitmap for the given vertex."""
     max_neighbors = get_neighbors_from_radius(vert, radii[-1])
     for radius in radii:
-        # -- Fit a plane on the neighbors
         neighbors_at_radius = [
             n for n in max_neighbors if distance_vec(vert.co, n.co) < radius
         ]
-        points = np.array(
-            [v.co for v in neighbors_at_radius] + [vert.co]
-        )  # TODO: should we add vert ?
-
-        # Skip if no neighbors
-        if points.shape[0] == 1:
-            continue
-
-        # Center the neighbors
-        centroid = np.mean(points, axis=0)
-        centered_points = points - centroid
-
-        # Compute covariance matrix relative to the centroid
-        cov = np.cov(centered_points.T)
-
-        # Compute eigenvalues and eigenvectors
-        eval, evec = np.linalg.eig(cov)
-
-        # Get the normal of the plane
-        plane_normal = evec[:, np.argmin(eval)]
-        plane_normal = Vector(plane_normal).normalized()
+        vert_normal = vert.normal.normalized()
 
         consistent_faces = 0
         inconsistent_faces = 0
@@ -983,7 +962,7 @@ def compute_mfitmap(vert: bmesh.types.BMVert, radii: np.ndarray, threshold=0.05)
         )
         for fneighbor in face_neighbors:
             face_normal = fneighbor.normal.normalized()
-            scalar = plane_normal.dot(face_normal)
+            scalar = vert_normal.dot(face_normal)
             if scalar >= 0:
                 consistent_faces += fneighbor.calc_area()
             else:
