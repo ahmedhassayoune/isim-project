@@ -483,8 +483,7 @@ def get_neighbor_vert_from_pos(
             return other_vert
         if (dist := distance_vec(other_vert.co, pos)) < min_dist:
             min_dist, min_vert = dist, other_vert
-    if VERBOSE:
-        print("Warning: No exact neighbor found")
+    print("Warning: No exact neighbor found")
     return min_vert
 
 
@@ -576,38 +575,35 @@ def collapse_diagonal(mesh: bmesh.types.BMesh, face: bmesh.types.BMFace):
     # Apply diagonal collapse on mid-point of the shortest diagonal
     if diag1_len < diag2_len:
         mid_position = (v1.co + v3.co) / 2
-        bmesh.ops.pointmerge(mesh, verts=[v1, v3], merge_co=mid_position)
-        mid_vert = get_neighbor_vert_from_pos(v2, mid_position)
+        diag_verts = [v1, v3]
+        neighbor_vert = v2
     else:
         mid_position = (v2.co + v4.co) / 2
-        bmesh.ops.pointmerge(mesh, verts=[v2, v4], merge_co=mid_position)
-        mid_vert = get_neighbor_vert_from_pos(v1, mid_position)
-
-    mid_vert.normal_update()  # maybe useless
+        diag_verts = [v2, v4]
+        neighbor_vert = v1
 
     # Cast 2 opposite rays from the mid-vertex to find the hit positions on source mesh M0
-    hit_pos, _, _, dist = BVH.ray_cast(mid_vert.co, mid_vert.normal)
-    hit_pos_opp, _, _, dist_opp = BVH.ray_cast(mid_vert.co, -mid_vert.normal)
+    hit_pos, _, _, dist = BVH.ray_cast(mid_position, face.normal)
+    hit_pos_opp, _, _, dist_opp = BVH.ray_cast(mid_position, -face.normal)
 
     # Handle case where no hit position is found
     if not hit_pos and not hit_pos_opp:
-        if VERBOSE:
-            print("Warning: No hit position or normal")
-        return mid_vert
+        raise Exception("Warning: No hit position or normal")
 
     if dist is None:
         dist = float("inf")
     if dist_opp is None:
         dist_opp = float("inf")
     # Get the closest hit position to the mid-vertex
-    if dist < dist_opp:
-        proj_mid_vert = hit_pos
-    else:
-        proj_mid_vert = hit_pos_opp
+    if dist_opp < dist:
+        hit_pos = hit_pos_opp
 
     # Project mid-vertex on the hit position
-    mid_vert.co = proj_mid_vert
-    return mid_vert
+    bmesh.ops.pointmerge(mesh, verts=diag_verts, merge_co=hit_pos)
+    mesh.faces.ensure_lookup_table()
+
+    merged_vert = get_neighbor_vert_from_pos(neighbor_vert, hit_pos)
+    return merged_vert
 
 
 def compute_energy(edge: bmesh.types.BMEdge) -> float:
@@ -684,7 +680,22 @@ def get_unique_verts(faces: list[bmesh.types.BMFace]) -> list[bmesh.types.BMVert
     return verts
 
 
-def smooth_mesh(verts: list[bmesh.types.BMVert], relax_iter: int = 10):
+def get_unique_faces(verts: list[bmesh.types.BMVert]) -> list[bmesh.types.BMFace]:
+    """Get a list of unique faces from the given list of vertices."""
+    faces = []
+    set_visited = set()
+
+    for vert in verts:
+        for face in vert.link_faces:
+            if face.index not in set_visited:
+                faces.append(face)
+                set_visited.add(face.index)
+    return faces
+
+
+def smooth_mesh(
+    mesh: bmesh.types.BMesh, verts: list[bmesh.types.BMVert], relax_iter: int = 10
+):
     """Smooth the local zone of the given vertices with `relax_iter` iterations."""
     euler_step = 0.1
     convergence_threshold = 0.001
@@ -715,11 +726,13 @@ def smooth_mesh(verts: list[bmesh.types.BMVert], relax_iter: int = 10):
                 if VERBOSE:
                     print("Warning: No closest position found")
                 continue
-            changed |= dist > average_length[i] * convergence_threshold
+            changed |= dist > (average_length[i] * convergence_threshold)
             vert.co = closest_pos
 
         if not changed:
             break
+    # Update the normals of the mesh
+    mesh.normal_update()
 
 
 def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
@@ -818,7 +831,9 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
                 else get_unique_verts(mid_vert.link_faces)
             )
 
-        smooth_mesh(smooth_verts, relax_iter=10)
+        smooth_mesh(mesh, smooth_verts, relax_iter=10)
+        modified_faces = get_unique_faces(smooth_verts)
+        push_updated_faces(modified_faces)
 
         if VERBOSE or MESH_ITERATION % 100 == 0:
             print(f"-- Iteration {MESH_ITERATION} done --")
@@ -1099,7 +1114,7 @@ if __name__ == "__main__":
     INITIAL_MESH = bm.copy()
     compute_fitmaps()
 
-    bm = simplify_mesh(bm, 1000)
+    bm = simplify_mesh(bm, 3346)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
