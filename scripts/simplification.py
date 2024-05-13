@@ -327,6 +327,8 @@ def compute_min_diagonal_length(face: bmesh.types.BMFace) -> float:
 def compute_barycentric_coordinates(point, triangle) -> bool:
     """
     Check if a point is inside a triangle and return the Barycentric Coordinate System.
+    Warning: The function assumes that the point is on the plane of the triangle.
+        -> If the point is not on the plane, the function can return True.
 
     Parameters:
     - point: The point to check.
@@ -358,7 +360,7 @@ def compute_barycentric_coordinates(point, triangle) -> bool:
 
     inside = (alpha >= 0) and (beta >= 0) and (alpha + beta <= 1)
 
-    return inside, alpha, beta, gamma
+    return inside, gamma, alpha, beta
 
 
 def interpolate_fitmap(face: bmesh.types.BMFace, point: Vector, fitmap_layer: str):
@@ -412,21 +414,19 @@ def interpolate_fitmap(face: bmesh.types.BMFace, point: Vector, fitmap_layer: st
     triangles = [tri_ABC, tri_ACD, tri_ABD, tri_BCD]
 
     for triangle in triangles:
-        inside, alpha, beta, gamma = compute_barycentric_coordinates(
-            projected, triangle
-        )
+        inside, *scalars = compute_barycentric_coordinates(projected, triangle)
         if inside:
             return (
-                alpha * triangle[0][fitmap_layer]
-                + beta * triangle[1][fitmap_layer]
-                + gamma * triangle[2][fitmap_layer]
+                scalars[0] * triangle[0][fitmap_layer]
+                + scalars[1] * triangle[1][fitmap_layer]
+                + scalars[2] * triangle[2][fitmap_layer]
             )
 
     # Return last triangle in any case <-- Not reached normalement
     return (
-        alpha * triangles[-1][0][fitmap_layer]
-        + beta * triangles[-1][1][fitmap_layer]
-        + gamma * triangles[-1][2][fitmap_layer]
+        scalars[0] * triangles[-1][0][fitmap_layer]
+        + scalars[1] * triangles[-1][1][fitmap_layer]
+        + scalars[2] * triangles[-1][2][fitmap_layer]
     )
 
 
@@ -617,18 +617,82 @@ def compute_energy(edge: bmesh.types.BMEdge) -> float:
     return np.sum(np.abs(verts - 4))
 
 
-def rotate_edges(mesh: bmesh.types.BMesh, edges: list):
+def check_rotation_validity(
+    rotated_edge: bmesh.types.BMEdge, mid_vert: bmesh.types.BMVert
+) -> bool:
+    """Check if the rotation of the given edge is valid."""
+    if not mid_vert.is_valid or len(rotated_edge.link_faces) != 2:
+        return False
+
+    # Determine the face that contains the mid-vertex and the face containing the 2 points that are not in the rotated edge
+    faceA, faceB = rotated_edge.link_faces
+    face_mid_vert, face_points = faceB, faceA
+    for v in faceA.verts:
+        if v.index == mid_vert.index:
+            face_mid_vert = faceA
+            face_points = faceB
+            break
+
+    # Get the 2 points of the face that are not in the rotated edge
+    points = []
+    for v in face_points.verts:
+        if (
+            v.index != rotated_edge.verts[0].index
+            and v.index != rotated_edge.verts[1].index
+        ):
+            points.append(v)
+
+    orig = mid_vert
+    normal = face_mid_vert.normal.normalized()
+    # Project each point to face_mid_vert
+    for point in points:
+        orig_to_point = point.co - orig.co
+        scalar = orig_to_point.dot(normal)
+        projected = point.co - scalar * normal
+
+        # Divide face_mid_vert into 2 triangles
+        tri_ABC = [
+            face_mid_vert.verts[0],
+            face_mid_vert.verts[1],
+            face_mid_vert.verts[2],
+        ]
+        tri_ACD = [
+            face_mid_vert.verts[0],
+            face_mid_vert.verts[2],
+            face_mid_vert.verts[3],
+        ]
+
+        # Determine if the projected point is inside the face
+        inside_ABC, _, _, _ = compute_barycentric_coordinates(projected, tri_ABC)
+        if inside_ABC:
+            return False
+        inside_ACD, _, _, _ = compute_barycentric_coordinates(projected, tri_ACD)
+        if inside_ACD:
+            return False
+
+    return True
+
+
+def rotate_edges(mesh: bmesh.types.BMesh, mid_vert: bmesh.types.BMVert):
     """Rotate the edges of the given list to minimize the energy."""
+    rotated_edges = []
+    if not mid_vert.is_valid:
+        return rotated_edges
+
+    edges = mid_vert.link_edges
     for i in range(len(edges)):
         edge = edges[i]
         if len(edge.link_faces) != 2:
             continue
 
+        # -- Compute energies
         base_energy = compute_energy(edge)
         # Rotate edge in clockwise direction + compute energy
         cw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=False)
         cw_edge = cw_edge["edges"]
-        cw_energy = compute_energy(cw_edge[0]) if cw_edge else float("inf")
+        cw_energy = float("inf")
+        if cw_edge and check_rotation_validity(cw_edge[0], mid_vert):
+            cw_energy = compute_energy(cw_edge[0])
 
         # Revert rotation to initial state
         if cw_edge:
@@ -638,8 +702,11 @@ def rotate_edges(mesh: bmesh.types.BMesh, edges: list):
         # Rotate edge in counter-clockwise direction + compute energy
         ccw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=True)
         ccw_edge = ccw_edge["edges"]
-        ccw_energy = compute_energy(ccw_edge[0]) if ccw_edge else float("inf")
+        ccw_energy = float("inf")
+        if ccw_edge and check_rotation_validity(ccw_edge[0], mid_vert):
+            ccw_energy = compute_energy(ccw_edge[0])
 
+        # -- Apply rotation with minimum energy
         if min(base_energy, cw_energy, ccw_energy) == base_energy:
             # Revert rotation to initial state
             if ccw_edge:
@@ -648,7 +715,7 @@ def rotate_edges(mesh: bmesh.types.BMesh, edges: list):
 
             push_updated_faces(
                 edge.link_faces
-            )  # reupdate faces even if no rotation is done
+            )  # TODO: reupdate faces even if no rotation is done -- Pas sur si necessaire
             continue
 
         if min(cw_energy, ccw_energy) == cw_energy:
@@ -660,11 +727,16 @@ def rotate_edges(mesh: bmesh.types.BMesh, edges: list):
             cw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=False)
             cw_edge = cw_edge["edges"][0]
 
-            return cw_edge
+            rotated_edges.append(cw_edge)
+        else:
+            rotated_edges.append(ccw_edge[0])
 
-        return ccw_edge[0]
+        # Update faces and clean local zone on last rotated edge
+        push_updated_faces(rotated_edges[-1].link_faces)
+        verts = get_unique_verts(rotated_edges[-1].link_faces)
+        clean_local_zone(mesh, verts)
 
-    return None
+    return rotated_edges
 
 
 def get_unique_verts(faces: list[bmesh.types.BMFace]) -> list[bmesh.types.BMVert]:
@@ -807,33 +879,33 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         cface = clean_local_zone(mesh, [mid_vert] + neighbor_verts)
 
         # -- Optimizing: Edge rotation --
-        cedges = mid_vert.link_edges if mid_vert.is_valid else cface.edges
-        rotated_edge = rotate_edges(mesh, cedges)
-
-        # --> Apply related cleaning operations + push updated faces
-        if rotated_edge:
-            push_updated_faces(rotated_edge.link_faces)
-
-            verts = get_unique_verts(rotated_edge.link_faces)
-            cface = clean_local_zone(mesh, verts)
+        if mid_vert.is_valid:
+            rotated_edges = rotate_edges(mesh, mid_vert)
+        # if len(mesh.faces) == 3411:
+        #     debug_here(mesh, [rotated_edge])
 
         # -- Smoothing: Tangent space smoothing --
-        if rotated_edge:
-            smooth_verts = (
-                cface.verts
-                if cface and cface.is_valid
-                else get_unique_verts(rotated_edge.link_faces)
-            )
-        else:
-            smooth_verts = (
-                cface.verts
-                if cface and cface.is_valid
-                else get_unique_verts(mid_vert.link_faces)
-            )
+        smooth_verts = []
+        if rotated_edges:
+            visited_verts = set()
+            for edge in rotated_edges:
+                if edge.is_valid:
+                    v1, v2 = edge.verts
+                    if v1.index not in visited_verts:
+                        smooth_verts.append(v1)
+                        visited_verts.add(v1.index)
+                    if v2.index not in visited_verts:
+                        smooth_verts.append(v2)
+                        visited_verts.add(v2.index)
+        elif mid_vert.is_valid:
+            smooth_verts = get_unique_verts(mid_vert.link_faces)
+        elif cface and cface.is_valid:
+            smooth_verts = cface.verts
 
-        smooth_mesh(mesh, smooth_verts, relax_iter=10)
-        modified_faces = get_unique_faces(smooth_verts)
-        push_updated_faces(modified_faces)
+        if smooth_verts:
+            smooth_mesh(mesh, smooth_verts, relax_iter=10)
+            modified_faces = get_unique_faces(smooth_verts)
+            push_updated_faces(modified_faces)
 
         if VERBOSE or MESH_ITERATION % 100 == 0:
             print(f"-- Iteration {MESH_ITERATION} done --")
@@ -1114,7 +1186,7 @@ if __name__ == "__main__":
     INITIAL_MESH = bm.copy()
     compute_fitmaps()
 
-    bm = simplify_mesh(bm, 3346)
+    bm = simplify_mesh(bm, 3411)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
