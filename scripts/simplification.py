@@ -679,9 +679,8 @@ def rotate_edges(mesh: bmesh.types.BMesh, mid_vert: bmesh.types.BMVert):
     if not mid_vert.is_valid:
         return rotated_edges
 
-    edges = mid_vert.link_edges
-    for i in range(len(edges)):
-        edge = edges[i]
+    edges = list(mid_vert.link_edges)
+    for edge in edges:
         if len(edge.link_faces) != 2:
             continue
 
