@@ -621,11 +621,16 @@ def check_rotation_validity(
     rotated_edge: bmesh.types.BMEdge, mid_vert: bmesh.types.BMVert
 ) -> bool:
     """Check if the rotation of the given edge is valid."""
-    if not mid_vert.is_valid or len(rotated_edge.link_faces) != 2:
+    if not mid_vert.is_valid:
+        return False
+    if len(rotated_edge.link_faces) != 2:
+        return False
+
+    faceA, faceB = rotated_edge.link_faces
+    if len(faceA.verts) != 4 or len(faceB.verts) != 4:
         return False
 
     # Determine the face that contains the mid-vertex and the face containing the 2 points that are not in the rotated edge
-    faceA, faceB = rotated_edge.link_faces
     face_mid_vert, face_points = faceB, faceA
     for v in faceA.verts:
         if v.index == mid_vert.index:
@@ -871,7 +876,8 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
 
         # -- Coarsening: Diagonal collapse --
         mid_vert = collapse_diagonal(mesh, face)
-        push_updated_faces(mid_vert.link_faces)
+        mid_vert_faces = list(mid_vert.link_faces)
+        push_updated_faces(mid_vert_faces)
 
         # --> Apply related cleaning operations
         neighbor_verts = [edge.other_vert(mid_vert) for edge in mid_vert.link_edges]
@@ -885,21 +891,24 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
 
         # -- Smoothing: Tangent space smoothing --
         smooth_verts = []
-        if rotated_edges:
-            visited_verts = set()
-            for edge in rotated_edges:
-                if edge.is_valid:
-                    v1, v2 = edge.verts
-                    if v1.index not in visited_verts:
-                        smooth_verts.append(v1)
-                        visited_verts.add(v1.index)
-                    if v2.index not in visited_verts:
-                        smooth_verts.append(v2)
-                        visited_verts.add(v2.index)
-        elif mid_vert.is_valid:
-            smooth_verts = get_unique_verts(mid_vert.link_faces)
-        elif cface and cface.is_valid:
-            smooth_verts = cface.verts
+        # if rotated_edges:
+        #     visited_verts = set()
+        #     for edge in rotated_edges:
+        #         if edge.is_valid:
+        #             v1, v2 = edge.verts
+        #             if v1.index not in visited_verts:
+        #                 smooth_verts.append(v1)
+        #                 visited_verts.add(v1.index)
+        #             if v2.index not in visited_verts:
+        #                 smooth_verts.append(v2)
+        #                 visited_verts.add(v2.index)
+        # elif mid_vert.is_valid:
+        #     smooth_verts = get_unique_verts(mid_vert.link_faces)
+        # elif cface and cface.is_valid:
+        #     smooth_verts = cface.verts
+        for face in mid_vert_faces:
+            if face.is_valid:
+                smooth_verts += face.verts
 
         if smooth_verts:
             smooth_mesh(mesh, smooth_verts, relax_iter=10)
@@ -1185,7 +1194,7 @@ if __name__ == "__main__":
     INITIAL_MESH = bm.copy()
     compute_fitmaps()
 
-    bm = simplify_mesh(bm, 3411)
+    bm = simplify_mesh(bm, 0)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
