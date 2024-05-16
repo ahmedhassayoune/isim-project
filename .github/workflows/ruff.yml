@@ -6,11 +6,11 @@ on:
 
 jobs:
   ruff:
-    permissions:
-      contents: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+            ssh-key: ${{ secrets.SSH_PRIVATE_KEY_LINT }}
       - uses: chartboost/ruff-action@v1
         with:
             args: format scripts tests
