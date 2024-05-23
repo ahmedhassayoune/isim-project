@@ -1,4 +1,5 @@
 import heapq
+from enum import Enum
 from queue import Queue
 from typing import Union
 from uuid import uuid4
@@ -266,6 +267,14 @@ turbo_colormap = [
     (0.49321, 0.01963, 0.00955),
     (0.47960, 0.01583, 0.01055),
 ]
+
+
+class Rotation(Enum):
+    """Enum class for rotation."""
+
+    NONE = 0
+    CW = 1
+    CCW = -1
 
 
 class MyHeap(object):
@@ -625,12 +634,24 @@ def collapse_diagonal(mesh: bmesh.types.BMesh, face: bmesh.types.BMFace):
     return merged_vert
 
 
-def compute_energy(edge: bmesh.types.BMEdge) -> float:
+def compute_energy(edge: bmesh.types.BMEdge, new_edge: list[bmesh.types.BMVert] = None):
     """Compute the energy of the given edge."""
     verts = get_unique_verts(edge.link_faces)
 
     # Transform to a list valence of each vertex
     verts = np.array([len(v.link_edges) for v in verts])
+
+    if new_edge:
+        # Update valence
+        vA_edge, vB_edge = new_edge
+        for i in range(verts.size):
+            if verts[i].index == vA_edge.index or verts[i].index == vB_edge.index:
+                verts[i] -= 1
+            elif (
+                verts[i].index == edge.verts[0].index
+                or verts[i].index == edge.verts[1].index
+            ):
+                verts[i] += 1
 
     # Compute the energy
     return np.sum(np.abs(verts - 4))
@@ -697,81 +718,112 @@ def check_rotation_validity(
     return True
 
 
-def rotate_edges(mesh: bmesh.types.BMesh, mid_vert: bmesh.types.BMVert):
+def best_rotation(edge: bmesh.types.BMEdge) -> Rotation:
+    """Determine the best rotation for the given edge."""
+    if not edge.is_valid:
+        return Rotation.NONE
+
+    face1, face2 = edge.link_faces
+    vA, vB = edge.verts
+    iAface1, iAface2 = None, None
+    iBface1, iBface2 = None, None
+
+    for i, vert in enumerate(face1.verts):
+        if vert.index == vA.index:
+            iAface1 = i
+        elif vert.index == vB.index:
+            iBface1 = i
+
+    for i, vert in enumerate(face2.verts):
+        if vert.index == vA.index:
+            iAface2 = i
+        elif vert.index == vB.index:
+            iBface2 = i
+
+    if iAface1 is None or iAface2 is None or iBface1 is None or iBface2 is None:
+        return Rotation.NONE
+
+    if (iBface1 + 1) % 4 != iAface1:
+        # Swap faces
+        face1, face2 = face2, face1
+
+    """
+    we have by now the following configuration:
+        o---A---o
+        | 1 | 2 |
+        o---B---o
+    """
+
+    base_energy = compute_energy(edge)
+
+    # Compute the energy of CW rotation
+    cw_vA = face2.verts[(iAface2 - 1) % 4]
+    cw_vB = face1.verts[(iBface1 - 1) % 4]
+    cw_energy = compute_energy(edge, [cw_vA, cw_vB])
+
+    # Compute the energy of CCW rotation
+    ccw_vA = face1.verts[(iAface1 + 1) % 4]
+    ccw_vB = face2.verts[(iBface2 + 1) % 4]
+    ccw_energy = compute_energy(edge, [ccw_vA, ccw_vB])
+
+    if base_energy < min(cw_energy, ccw_energy):
+        return Rotation.NONE
+    elif cw_energy < ccw_energy:
+        return Rotation.CW
+    else:
+        return Rotation.CCW
+
+
+def rotate_edges(bm: bmesh.types.BMesh, mid_vert: bmesh.types.BMVert):
     """Rotate the edges of the given list to minimize the energy."""
-    rotated_edges = []
+    modified_faces = []
     if not mid_vert.is_valid:
-        return rotated_edges
+        return modified_faces
 
     edges = list(mid_vert.link_edges)
     for edge in edges:
         if len(edge.link_faces) != 2:
             continue
 
-        # -- Compute energies
-        base_energy = compute_energy(edge)
-        # Rotate edge in clockwise direction + compute energy
-        cw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=False)
-        cw_edge = cw_edge["edges"]
-        cw_energy = float("inf")
-        if cw_edge and check_rotation_validity(cw_edge[0], mid_vert):
-            cw_energy = compute_energy(cw_edge[0])
+        rotation = best_rotation(edge, mid_vert)
 
-        # Revert rotation to initial state
-        if cw_edge:
-            edge = bmesh.ops.rotate_edges(mesh, edges=[cw_edge[0]], use_ccw=True)
-            edge = edge["edges"][0]
-
-        # Rotate edge in counter-clockwise direction + compute energy
-        ccw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=True)
-        ccw_edge = ccw_edge["edges"]
-        ccw_energy = float("inf")
-        if ccw_edge and check_rotation_validity(ccw_edge[0], mid_vert):
-            ccw_energy = compute_energy(ccw_edge[0])
-
-        # -- Apply rotation with minimum energy
-        if min(base_energy, cw_energy, ccw_energy) == base_energy:
-            # Revert rotation to initial state
-            if ccw_edge:
-                edge = bmesh.ops.rotate_edges(mesh, edges=[ccw_edge[0]], use_ccw=False)
-                edge = edge["edges"][0]
-
-            push_updated_faces(
-                edge.link_faces
-            )  # TODO: reupdate faces even if no rotation is done -- Pas sur si necessaire
+        if rotation == Rotation.NONE:
             continue
 
-        if min(cw_energy, ccw_energy) == cw_energy:
-            # Revert rotation to initial state
-            if ccw_edge:
-                edge = bmesh.ops.rotate_edges(mesh, edges=[ccw_edge[0]], use_ccw=False)
-                edge = edge["edges"][0]
+        # Record edge vertices
+        v1, v2 = edge.verts
 
-            cw_edge = bmesh.ops.rotate_edges(mesh, edges=[edge], use_ccw=False)
-            cw_edge = cw_edge["edges"][0]
-
-            rotated_edges.append(cw_edge)
+        # Apply rotation
+        if rotation == Rotation.CW:
+            rotated_edge = bmesh.ops.rotate_edges(bm, edges=[edge], use_ccw=False)
+            rotated_edge = rotated_edge["edges"]
         else:
-            rotated_edges.append(ccw_edge[0])
+            rotated_edge = bmesh.ops.rotate_edges(bm, edges=[edge], use_ccw=True)
+            rotated_edge = rotated_edge["edges"]
 
-        # Update faces and clean local zone on last rotated edge
-        push_updated_faces(rotated_edges[-1].link_faces)
-        verts = get_unique_verts(rotated_edges[-1].link_faces)
-        clean_local_zone(mesh, verts)
+        # Check if the rotation is valid
+        if not rotated_edge:
+            continue
+        rotated_edge = rotated_edge[0]
 
-    return rotated_edges
+        # Update faces and clean local zone
+        HEAP.push(rotated_edge.link_faces)
+        clean_faces = clean_local_zone(bm, [v1, v2])
+        modified_faces.extend(clean_faces)
+
+    return modified_faces
 
 
 def get_unique_verts(faces: list[bmesh.types.BMFace]) -> list[bmesh.types.BMVert]:
     """Get a list of unique vertices from the given list of faces."""
     verts = []
-    set_visited = set()
+    visited = set()
 
     for face in faces:
         for vert in face.verts:
-            if vert.index not in set_visited:
+            if vert.index not in visited:
+                visited.add(vert.index)
                 verts.append(vert)
-                set_visited.add(vert.index)
     return verts
 
 
@@ -903,31 +955,14 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         clean_faces = clean_local_zone(mesh, [mid_vert] + neighbor_verts)
 
         # -- Optimizing: Edge rotation --
-        if mid_vert.is_valid:
-            rotated_edges = rotate_edges(mesh, mid_vert)
-        # if len(mesh.faces) == 3411:
-        #     debug_here(mesh, [rotated_edge])
+        modified_faces = rotate_edges(mesh, mid_vert)
 
         # -- Smoothing: Tangent space smoothing --
+        all_modified_faces = mid_vert_faces + clean_faces + modified_faces
         smooth_verts = []
-        # if rotated_edges:
-        #     visited_verts = set()
-        #     for edge in rotated_edges:
-        #         if edge.is_valid:
-        #             v1, v2 = edge.verts
-        #             if v1.index not in visited_verts:
-        #                 smooth_verts.append(v1)
-        #                 visited_verts.add(v1.index)
-        #             if v2.index not in visited_verts:
-        #                 smooth_verts.append(v2)
-        #                 visited_verts.add(v2.index)
-        # elif mid_vert.is_valid:
-        #     smooth_verts = get_unique_verts(mid_vert.link_faces)
-        # elif cface and cface.is_valid:
-        #     smooth_verts = cface.verts
-        for face in mid_vert_faces:
+        for face in all_modified_faces:
             if face.is_valid:
-                smooth_verts += face.verts
+                smooth_verts.extend(face.verts)
 
         if smooth_verts:
             smooth_mesh(mesh, smooth_verts, relax_iter=10)
