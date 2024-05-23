@@ -548,10 +548,14 @@ def push_updated_faces(faces: list[bmesh.types.BMesh], out_index=None):
 
 def allow_collapse(face: bmesh.types.BMFace) -> bool:
     """Check if the given face is allowed to collapse based on M-Fitmap on surrounding faces"""
+    # Get surrounding faces
+    visited = set()
+    visited.add(face.index)
     surrounding_faces = []
-    for edge in face.edges:
-        for f in edge.link_faces:
-            if f.index != face.index:
+    for vert in face.verts:
+        for f in vert.link_faces:
+            if f.index not in visited:
+                visited.add(f.index)
                 surrounding_faces.append(f)
 
     for sface in surrounding_faces:
