@@ -487,55 +487,70 @@ def get_neighbor_vert_from_pos(
     return min_vert
 
 
-def remove_doublet(mesh: bmesh.types.BMesh, vert: bmesh.types.BMVert):
-    """Remove a single doublet."""
-    if len(vert.link_edges) != 2:
-        return None
-
-    # Dissolve linked faces
-    region = bmesh.ops.dissolve_faces(mesh, faces=vert.link_faces, use_verts=True)
-    face = region["region"]
-    if not face:
-        return None
-    face = face[0]
-    HEAP.push(face)
-
-    return face
-
-
 def remove_doublets(
-    mesh: bmesh.types.BMesh,
+    bm: bmesh.types.BMesh,
     verts: list[bmesh.types.BMVert],
-    visited: set = set(),
 ):
-    """Remove doublets in verts recursively."""
-    clean_face = None
+    """Remove doublets in given verts and update the heap."""
+    clean_faces = []
+
+    q = Queue()
+    # Push all doublet vertices to the queue
     for vert in verts:
-        if not vert.is_valid or vert.index in visited:
-            continue
-        visited.add(vert.index)
-        other_verts = [edge.other_vert(vert) for edge in vert.link_edges]
-        face = remove_doublet(mesh, vert)
-        if not face:
-            continue
-        HEAP.push(face)
-        clean_face = remove_doublets(mesh, other_verts, visited)
-        clean_face = clean_face if clean_face is not None else face
+        if len(vert.link_edges) == 2:
+            q.put(vert)
 
-    return clean_face
+    while not q.empty():
+        vert = q.get()
+
+        # Fetch adjacent vertices
+        av1, av2 = (
+            vert.link_edges[0].other_vert(vert),
+            vert.link_edges[1].other_vert(vert),
+        )
+
+        # Remove doublet
+        region = bmesh.ops.dissolve_faces(bm, faces=vert.link_faces, use_verts=True)
+        faces = region["region"]
+
+        # Push adjacent vertices to the queue if they are doublets
+        if av1.is_valid and len(av1.link_edges) == 2:
+            q.put(av1)
+        if av2.is_valid and len(av2.link_edges) == 2:
+            q.put(av2)
+
+        if faces:
+            clean_faces.append(faces[0])
+
+    # Keep only valid clean faces
+    valid_clean_faces = []
+    for face in clean_faces:
+        if face.is_valid:
+            valid_clean_faces.append(face)
+            HEAP.push(face)
+
+    return valid_clean_faces
 
 
-def clean_local_zone(mesh: bmesh.types.BMesh, verts: list[bmesh.types.BMVert]):
+def clean_local_zone(bm: bmesh.types.BMesh, verts: list[bmesh.types.BMVert]):
     # Remove doublets recursively
-    face = remove_doublets(mesh, verts, set())
-    if not face:
+    clean_faces = remove_doublets(bm, verts)
+    if not clean_faces:
         return None
 
     # Remove potiential generated singlets or other degenerates
     # e.g. edges w/o length, faces w/o area ...
-    bmesh.ops.dissolve_degenerate(mesh, edges=face.edges)
+    for cface in clean_faces:
+        if cface.is_valid:
+            bmesh.ops.dissolve_degenerate(bm, edges=cface.edges)
 
-    return face
+    # Make sure we keep only valid faces
+    valid_clean_faces = []
+    for cface in clean_faces:
+        if cface.is_valid:
+            valid_clean_faces.append(cface)
+
+    return valid_clean_faces
 
 
 def push_updated_faces(faces: list[bmesh.types.BMesh], out_index=None):
@@ -885,7 +900,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
 
         # --> Apply related cleaning operations
         neighbor_verts = [edge.other_vert(mid_vert) for edge in mid_vert.link_edges]
-        cface = clean_local_zone(mesh, [mid_vert] + neighbor_verts)
+        clean_faces = clean_local_zone(mesh, [mid_vert] + neighbor_verts)
 
         # -- Optimizing: Edge rotation --
         if mid_vert.is_valid:
