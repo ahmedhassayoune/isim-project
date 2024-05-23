@@ -545,7 +545,7 @@ def clean_local_zone(bm: bmesh.types.BMesh, verts: list[bmesh.types.BMVert]):
     # Remove doublets recursively
     clean_faces = remove_doublets(bm, verts)
     if not clean_faces:
-        return None
+        return clean_faces
 
     # Remove potiential generated singlets or other degenerates
     # e.g. edges w/o length, faces w/o area ...
@@ -639,22 +639,24 @@ def compute_energy(edge: bmesh.types.BMEdge, new_edge: list[bmesh.types.BMVert] 
     verts = get_unique_verts(edge.link_faces)
 
     # Transform to a list valence of each vertex
-    verts = np.array([len(v.link_edges) for v in verts])
+    valences = np.array([len(v.link_edges) for v in verts])
 
     if new_edge:
         # Update valence
         vA_edge, vB_edge = new_edge
-        for i in range(verts.size):
+        for i in range(valences.size):
             if verts[i].index == vA_edge.index or verts[i].index == vB_edge.index:
-                verts[i] -= 1
+                # Increase valence of the new edge vertices
+                valences[i] += 1
             elif (
                 verts[i].index == edge.verts[0].index
                 or verts[i].index == edge.verts[1].index
             ):
-                verts[i] += 1
+                # Decrease valence of the old edge vertices
+                valences[i] -= 1
 
     # Compute the energy
-    return np.sum(np.abs(verts - 4))
+    return np.sum(np.abs(valences - 4))
 
 
 def check_rotation_validity(
@@ -785,7 +787,7 @@ def rotate_edges(bm: bmesh.types.BMesh, mid_vert: bmesh.types.BMVert):
         if len(edge.link_faces) != 2:
             continue
 
-        rotation = best_rotation(edge, mid_vert)
+        rotation = best_rotation(edge)
 
         if rotation == Rotation.NONE:
             continue
@@ -807,7 +809,8 @@ def rotate_edges(bm: bmesh.types.BMesh, mid_vert: bmesh.types.BMVert):
         rotated_edge = rotated_edge[0]
 
         # Update faces and clean local zone
-        HEAP.push(rotated_edge.link_faces)
+        for f in rotated_edge.link_faces:
+            HEAP.push(f)
         clean_faces = clean_local_zone(bm, [v1, v2])
         modified_faces.extend(clean_faces)
 
