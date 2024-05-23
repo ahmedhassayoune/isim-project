@@ -554,10 +554,7 @@ def clean_local_zone(bm: bmesh.types.BMesh, verts: list[bmesh.types.BMVert]):
             bmesh.ops.dissolve_degenerate(bm, edges=cface.edges)
 
     # Make sure we keep only valid faces
-    valid_clean_faces = []
-    for cface in clean_faces:
-        if cface.is_valid:
-            valid_clean_faces.append(cface)
+    valid_clean_faces = [f for f in clean_faces if f.is_valid]
 
     return valid_clean_faces
 
@@ -811,10 +808,12 @@ def rotate_edges(bm: bmesh.types.BMesh, mid_vert: bmesh.types.BMVert):
         # Update faces and clean local zone
         for f in rotated_edge.link_faces:
             HEAP.push(f)
+            modified_faces.append(f)
         clean_faces = clean_local_zone(bm, [v1, v2])
         modified_faces.extend(clean_faces)
 
-    return modified_faces
+    valid_modified_faces = [f for f in modified_faces if f.is_valid]
+    return valid_modified_faces
 
 
 def get_unique_verts(faces: list[bmesh.types.BMFace]) -> list[bmesh.types.BMVert]:
