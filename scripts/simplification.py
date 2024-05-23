@@ -961,15 +961,15 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
 
         # -- Smoothing: Tangent space smoothing --
         all_modified_faces = mid_vert_faces + clean_faces + modified_faces
-        smooth_verts = []
-        for face in all_modified_faces:
-            if face.is_valid:
-                smooth_verts.extend(face.verts)
+        all_modified_faces_valid = [f for f in all_modified_faces if f.is_valid]
+        smooth_verts = get_unique_verts(all_modified_faces_valid)
 
         if smooth_verts:
             smooth_mesh(mesh, smooth_verts, relax_iter=10)
-            modified_faces = get_unique_faces(smooth_verts)
-            push_updated_faces(modified_faces)
+            push_updated_faces(all_modified_faces_valid)
+
+        # if MESH_ITERATION == 50:
+        #     debug_here(mesh, all_modified_faces_valid)
 
         if VERBOSE or MESH_ITERATION % 100 == 0:
             print(f"-- Iteration {MESH_ITERATION} done --")
