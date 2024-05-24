@@ -796,7 +796,7 @@ def best_rotation(edge: bmesh.types.BMEdge, mid_vert: bmesh.types.BMVert) -> Rot
     else:
         ccw_energy = compute_energy(edge, [ccw_vA, ccw_vB])
 
-    if base_energy < min(cw_energy, ccw_energy):
+    if base_energy <= min(cw_energy, ccw_energy):
         return Rotation.NONE
     elif cw_energy < ccw_energy:
         return Rotation.CW
@@ -835,9 +835,6 @@ def rotate_edges(bm: bmesh.types.BMesh, mid_vert: bmesh.types.BMVert):
         if not rotated_edge:
             continue
         rotated_edge = rotated_edge[0]
-        # if MESH_ITERATION == 2 and i == 5:
-        #     print("ROTATION", rotation)
-        #     debug_here(bm, [rotated_edge])
 
         # Update faces and clean local zone
         for f in rotated_edge.link_faces:
@@ -845,9 +842,6 @@ def rotate_edges(bm: bmesh.types.BMesh, mid_vert: bmesh.types.BMVert):
             modified_faces.append(f)
         clean_faces = clean_local_zone(bm, [v1, v2])
         modified_faces.extend(clean_faces)
-        # if MESH_ITERATION == 2 and i == 2:
-        #     print("ROTATION", rotation)
-        #     debug_here(bm, [rotated_edge])
 
     valid_modified_faces = [f for f in modified_faces if f.is_valid]
     return valid_modified_faces
@@ -1005,7 +999,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
             smooth_mesh(mesh, smooth_verts, relax_iter=10)
             push_updated_faces(all_modified_faces_valid)
 
-        # if MESH_ITERATION == 50:
+        # if MESH_ITERATION == 8:
         #     debug_here(mesh, all_modified_faces_valid)
 
         if VERBOSE or MESH_ITERATION % 100 == 0:
@@ -1142,8 +1136,6 @@ def compute_sfitmap(vert: bmesh.types.BMVert, radii: np.ndarray):
         ]
         radius_error = compute_radius_error(neighbors_at_radius, vert)
         radii_errors.append(radius_error)
-        # if vert.index == 0 and radius == radii[-1]:
-        #     debug_here(INITIAL_MESH, neighbors_at_radius)
     # fit ax^4
     A = np.power(radii, 4).reshape(-1, 1)
     b = np.array(radii_errors)
@@ -1151,7 +1143,8 @@ def compute_sfitmap(vert: bmesh.types.BMVert, radii: np.ndarray):
     coefs = np.linalg.lstsq(A, b, rcond=None)[0]
     a = coefs[0]
 
-    vert[SFITMAP_LAYER] = np.power(a, 0.25)
+    # Add 1 to avoid 0 values that can cause issues to priority HEAP
+    vert[SFITMAP_LAYER] = np.power(a, 0.25) + 1
 
 
 def compute_mfitmap(vert: bmesh.types.BMVert, radii: np.ndarray, threshold=0.05):
