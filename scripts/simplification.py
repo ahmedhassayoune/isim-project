@@ -333,7 +333,9 @@ def compute_min_diagonal_length(face: bmesh.types.BMFace) -> float:
     return min(diag1_len, diag2_len)
 
 
-def compute_barycentric_coordinates(point, triangle) -> bool:
+def compute_barycentric_coordinates(
+    point: Vector, triangle: list[bmesh.types.BMVert]
+) -> bool:
     """
     Check if a point is inside a triangle and return the Barycentric Coordinate System.
     Warning: The function assumes that the point is on the plane of the triangle.
@@ -656,73 +658,96 @@ def compute_energy(edge: bmesh.types.BMEdge, new_edge: list[bmesh.types.BMVert] 
     return np.sum(np.abs(valences - 4))
 
 
-def check_rotation_validity(
-    rotated_edge: bmesh.types.BMEdge, mid_vert: bmesh.types.BMVert
+def is_valid_rotation(
+    mid_vert: bmesh.types.BMVert,
+    old_edge: bmesh.types.BMEdge,
+    new_edge: list[bmesh.types.BMVert],
 ) -> bool:
     """Check if the rotation of the given edge is valid."""
     if not mid_vert.is_valid:
         return False
-    if len(rotated_edge.link_faces) != 2:
+    if len(old_edge.link_faces) != 2:
         return False
 
-    faceA, faceB = rotated_edge.link_faces
+    faceA, faceB = old_edge.link_faces
     if len(faceA.verts) != 4 or len(faceB.verts) != 4:
         return False
 
-    # Determine the face that contains the mid-vertex and the face containing the 2 points that are not in the rotated edge
-    face_mid_vert, face_points = faceB, faceA
-    for v in faceA.verts:
-        if v.index == mid_vert.index:
-            face_mid_vert = faceA
-            face_points = faceB
-            break
+    iAmid_vert, iBmid_vert = 0, 0
+    for i in range(4):
+        vA, vB = faceA.verts[i], faceB.verts[i]
+        if vA.index == mid_vert.index:
+            iAmid_vert = i
+        if vB.index == mid_vert.index:
+            iBmid_vert = i
 
-    # Get the 2 points of the face that are not in the rotated edge
-    points = []
-    for v in face_points.verts:
-        if (
-            v.index != rotated_edge.verts[0].index
-            and v.index != rotated_edge.verts[1].index
-        ):
-            points.append(v)
+    target_vert = old_edge.other_vert(mid_vert)
 
-    orig = mid_vert
-    normal = face_mid_vert.normal.normalized()
-    # Project each point to face_mid_vert
-    for point in points:
-        orig_to_point = point.co - orig.co
-        scalar = orig_to_point.dot(normal)
-        projected = point.co - scalar * normal
+    if faceA.verts[(iAmid_vert + 1) % 4].index == target_vert.index:
+        # Swap faces
+        faceA, faceB = faceB, faceA
+        iAmid_vert, iBmid_vert = iBmid_vert, iAmid_vert
 
-        # Divide face_mid_vert into 2 triangles
-        tri_ABC = [
-            face_mid_vert.verts[0],
-            face_mid_vert.verts[1],
-            face_mid_vert.verts[2],
-        ]
-        tri_ACD = [
-            face_mid_vert.verts[0],
-            face_mid_vert.verts[2],
-            face_mid_vert.verts[3],
-        ]
+    """
+    We have by now the following configuration:
+        o---M---o
+        | A | B |
+        o---T---o
+    """
 
-        # Determine if the projected point is inside the face
-        inside_ABC, _, _, _ = compute_barycentric_coordinates(projected, tri_ABC)
-        if inside_ABC:
-            return False
-        inside_ACD, _, _, _ = compute_barycentric_coordinates(projected, tri_ACD)
-        if inside_ACD:
-            return False
+    empty_left = (new_edge[0].index != faceA.verts[(iAmid_vert + 1) % 4].index) and (
+        new_edge[1].index != faceA.verts[(iAmid_vert + 1) % 4].index
+    )
+    if empty_left:
+        """
+        We have by now the following configuration:
+            v2---v1---v4
+            |  A  |  B |
+            v3----T----o
+        """
+        v1 = mid_vert
+        v2 = faceA.verts[(iAmid_vert + 1) % 4]
+        v3 = faceA.verts[(iAmid_vert + 2) % 4]
+        v4 = new_edge[0] if v3.index == new_edge[1].index else new_edge[1]
+    else:
+        """
+        We have by now the following configuration:
+            v4---v1---v2
+            |  A  |  B |
+            v3----T----o
+        """
+        v1 = mid_vert
+        v2 = faceB.verts[(iBmid_vert - 1) % 4]
+        v3 = faceB.verts[(iBmid_vert - 2) % 4]
+        v4 = new_edge[0] if v3.index == new_edge[1].index else new_edge[1]
+
+    # Divide plane into 2 triangles
+    tri_ABC = [v1, v2, v3]
+    tri_ACD = [v1, v3, v4]
+
+    # Determine if the point is inside the face
+    inside_ABC, _, _, _ = compute_barycentric_coordinates(target_vert.co, tri_ABC)
+    if inside_ABC:
+        return False
+    inside_ACD, _, _, _ = compute_barycentric_coordinates(target_vert.co, tri_ACD)
+    if inside_ACD:
+        return False
 
     return True
 
 
-def best_rotation(edge: bmesh.types.BMEdge) -> Rotation:
+def best_rotation(edge: bmesh.types.BMEdge, mid_vert: bmesh.types.BMVert) -> Rotation:
     """Determine the best rotation for the given edge."""
     if not edge.is_valid:
         return Rotation.NONE
 
+    if len(edge.link_faces) != 2:
+        return Rotation.NONE
+
     face1, face2 = edge.link_faces
+    if len(face1.verts) != 4 or len(face2.verts) != 4:
+        return Rotation.NONE
+
     vA, vB = edge.verts
     iAface1, iAface2 = None, None
     iBface1, iBface2 = None, None
@@ -758,12 +783,18 @@ def best_rotation(edge: bmesh.types.BMEdge) -> Rotation:
     # Compute the energy of CW rotation
     cw_vA = face2.verts[(iAface2 - 1) % 4]
     cw_vB = face1.verts[(iBface1 - 1) % 4]
-    cw_energy = compute_energy(edge, [cw_vA, cw_vB])
+    if not is_valid_rotation(mid_vert, edge, [cw_vA, cw_vB]):
+        cw_energy = float("inf")
+    else:
+        cw_energy = compute_energy(edge, [cw_vA, cw_vB])
 
     # Compute the energy of CCW rotation
     ccw_vA = face1.verts[(iAface1 + 1) % 4]
     ccw_vB = face2.verts[(iBface2 + 1) % 4]
-    ccw_energy = compute_energy(edge, [ccw_vA, ccw_vB])
+    if not is_valid_rotation(mid_vert, edge, [ccw_vA, ccw_vB]):
+        ccw_energy = float("inf")
+    else:
+        ccw_energy = compute_energy(edge, [ccw_vA, ccw_vB])
 
     if base_energy < min(cw_energy, ccw_energy):
         return Rotation.NONE
@@ -780,11 +811,11 @@ def rotate_edges(bm: bmesh.types.BMesh, mid_vert: bmesh.types.BMVert):
         return modified_faces
 
     edges = list(mid_vert.link_edges)
-    for edge in edges:
+    for i, edge in enumerate(edges):
         if len(edge.link_faces) != 2:
             continue
 
-        rotation = best_rotation(edge)
+        rotation = best_rotation(edge, mid_vert)
 
         if rotation == Rotation.NONE:
             continue
@@ -804,6 +835,9 @@ def rotate_edges(bm: bmesh.types.BMesh, mid_vert: bmesh.types.BMVert):
         if not rotated_edge:
             continue
         rotated_edge = rotated_edge[0]
+        # if MESH_ITERATION == 2 and i == 5:
+        #     print("ROTATION", rotation)
+        #     debug_here(bm, [rotated_edge])
 
         # Update faces and clean local zone
         for f in rotated_edge.link_faces:
@@ -811,6 +845,9 @@ def rotate_edges(bm: bmesh.types.BMesh, mid_vert: bmesh.types.BMVert):
             modified_faces.append(f)
         clean_faces = clean_local_zone(bm, [v1, v2])
         modified_faces.extend(clean_faces)
+        # if MESH_ITERATION == 2 and i == 2:
+        #     print("ROTATION", rotation)
+        #     debug_here(bm, [rotated_edge])
 
     valid_modified_faces = [f for f in modified_faces if f.is_valid]
     return valid_modified_faces
