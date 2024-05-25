@@ -873,6 +873,20 @@ def get_unique_faces(verts: list[bmesh.types.BMVert]) -> list[bmesh.types.BMFace
     return faces
 
 
+def get_diagonal_vertices(vert: bmesh.types.BMVert) -> list[bmesh.types.BMVert]:
+    """Get the diagonal vertices of the given vertex."""
+    diagonals = []
+    if not vert.is_valid:
+        return diagonals
+    for face in vert.link_faces:
+        if len(face.verts) != 4:
+            continue
+        vert_index = [v.index for v in face.verts].index(vert.index)
+        diag_vert = face.verts[(vert_index + 2) % 4]
+        diagonals.append(diag_vert)
+    return diagonals
+
+
 def smooth_mesh(
     mesh: bmesh.types.BMesh, verts: list[bmesh.types.BMVert], relax_iter: int = 10
 ):
@@ -881,20 +895,26 @@ def smooth_mesh(
     convergence_threshold = 0.001
 
     for i in range(relax_iter):
-        average_length = np.zeros(len(verts), dtype=float)
+        # Compute global `Mi` average length
+        average_length = np.mean([edge.calc_length() for edge in mesh.edges])
+        average_length_diag = np.sqrt(2) * average_length
+
+        # Compute the average forces of each vertex based on the average length
         average_forces = np.array([Vector((0.0, 0.0, 0.0))] * len(verts))
         for i, vert in enumerate(verts):
-            # Compute the average length of the edges of each vertex
-            average_length[i] = np.mean(
-                [edge.calc_length() for edge in vert.link_edges]
-            )
-
-            # Compute the average forces of each vertex based on the average length
+            # Compute the force vector for each direct edge
             for edge in vert.link_edges:
                 other = edge.other_vert(vert)
                 force_vec = vert.co - other.co
                 average_forces[i] += force_vec.normalized() * (
-                    average_length[i] - force_vec.length
+                    average_length - force_vec.length
+                )
+            # Compute the force vector for each diagonal edge
+            diagonals = get_diagonal_vertices(vert)
+            for diag in diagonals:
+                force_vec = vert.co - diag.co
+                average_forces[i] += force_vec.normalized() * (
+                    average_length_diag - force_vec.length
                 )
 
         changed = False
@@ -906,7 +926,7 @@ def smooth_mesh(
                 if VERBOSE:
                     print("Warning: No closest position found")
                 continue
-            changed |= dist > (average_length[i] * convergence_threshold)
+            changed |= dist > (average_length * convergence_threshold)
             vert.co = closest_pos
 
         if not changed:
@@ -998,8 +1018,8 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         if smooth_verts:
             smooth_mesh(mesh, smooth_verts, relax_iter=10)
             push_updated_faces(all_modified_faces_valid)
-        # if MESH_ITERATION == 100:
-        #     debug_here(mesh, all_modified_faces_valid)
+        # if MESH_ITERATION == 50:
+        #     debug_here(mesh, modified_faces)
 
         if VERBOSE or MESH_ITERATION % 100 == 0:
             print(f"-- Iteration {MESH_ITERATION} done --")
@@ -1072,7 +1092,7 @@ def get_faces_neighbors_from_verts(
 
 
 def compute_radius_error(neighbors: list, vert: bmesh.types.BMVert) -> float:
-    if len(neighbors) < 16:
+    if len(neighbors) < 3:
         return 0.0
 
     yaxis = Vector((0.0, 1.0, 0.0))
@@ -1084,7 +1104,7 @@ def compute_radius_error(neighbors: list, vert: bmesh.types.BMVert) -> float:
     v = v.normalized()
 
     # TODO: maybe they want plane fit
-    A = np.zeros((len(neighbors), 16))
+    A = np.zeros((len(neighbors), 3))
     b = np.zeros(len(neighbors))
 
     for i, neighbor in enumerate(neighbors):
@@ -1095,26 +1115,7 @@ def compute_radius_error(neighbors: list, vert: bmesh.types.BMVert) -> float:
         y = diff.dot(v)
         z = diff.dot(normal)
 
-        A[i] = np.array(
-            [
-                x**3 * y**3,
-                x**3 * y**2,
-                x**3 * y,
-                x**3,
-                x**2 * y**3,
-                x**2 * y**2,
-                x**2 * y,
-                x**2,
-                x * y**3,
-                x * y**2,
-                x * y,
-                x,
-                y**3,
-                y**2,
-                y,
-                1,
-            ]
-        )
+        A[i] = np.array([x, y, 1])
         b[i] = z
 
     # Fit a cubic polynomial on tangent frame
@@ -1135,15 +1136,15 @@ def compute_sfitmap(vert: bmesh.types.BMVert, radii: np.ndarray):
         ]
         radius_error = compute_radius_error(neighbors_at_radius, vert)
         radii_errors.append(radius_error)
-    # fit ax^4
-    A = np.power(radii, 4).reshape(-1, 1)
+    # fit ax^2
+    A = np.power(radii, 2).reshape(-1, 1)
     b = np.array(radii_errors)
 
     coefs = np.linalg.lstsq(A, b, rcond=None)[0]
     a = coefs[0]
 
     # Add 1 to avoid 0 values that can cause issues to priority HEAP
-    vert[SFITMAP_LAYER] = np.power(a, 0.25) + 1
+    vert[SFITMAP_LAYER] = np.sqrt(a) + 1
 
 
 def compute_mfitmap(vert: bmesh.types.BMVert, radii: np.ndarray, threshold=0.05):
