@@ -1179,7 +1179,7 @@ def compute_fitmaps():
         mfitmap_radius = None
 
         max_neighbors = get_neighbors_from_radius(vert, radii[-1])
-        for i, radius in enumerate(radii):
+        for j, radius in enumerate(radii):
             neighbors_at_radius = [
                 n for n in max_neighbors if distance_vec(vert.co, n.co) < radius
             ]
@@ -1198,16 +1198,16 @@ def compute_fitmaps():
             vert_normal = vert.normal.normalized()
             if plane_normal.dot(vert_normal) < 0:
                 plane_normal = -plane_normal
-            plane_normal = (
-                vert_normal  # TODO: remove if you want to use the computed plane
-            )
+            # plane_normal = (
+            #     vert_normal  # TODO: remove if you want to use the computed plane
+            # )
 
             face_neighbors = get_faces_neighbors_from_verts(
                 vert, neighbors_at_radius, radius
             )
             finished = compute_mfitmap(plane_normal, face_neighbors)
             if finished:
-                mfitmap_radius = radii[i - 1] if i > 0 else 0
+                mfitmap_radius = radii[j - 1] if j > 0 else 0
 
         vert[SFITMAP_LAYER] = compute_sfitmap(radii, radii_errors)
         vert[MFITMAP_LAYER] = (
@@ -1299,7 +1299,7 @@ if __name__ == "__main__":
     INITIAL_MESH = bm.copy()
     compute_fitmaps()
 
-    bm = simplify_mesh(bm, 0)
+    bm = simplify_mesh(bm, 2000)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
