@@ -1093,9 +1093,9 @@ def get_faces_neighbors_from_verts(
     return neighbor_faces
 
 
-def compute_radius_error(neighbors: list, vert: bmesh.types.BMVert) -> float:
+def fit_polynomial(neighbors: list, vert: bmesh.types.BMVert) -> tuple:
     if len(neighbors) < 3:
-        return 0.0
+        return None, 0
 
     yaxis = Vector((0.0, 1.0, 0.0))
     zaxis = Vector((0.0, 0.0, 1.0))
@@ -1105,7 +1105,6 @@ def compute_radius_error(neighbors: list, vert: bmesh.types.BMVert) -> float:
     v = normal.cross(u)
     v = v.normalized()
 
-    # TODO: maybe they want plane fit
     A = np.zeros((len(neighbors), 3))
     b = np.zeros(len(neighbors))
 
@@ -1120,24 +1119,16 @@ def compute_radius_error(neighbors: list, vert: bmesh.types.BMVert) -> float:
         A[i] = np.array([x, y, 1])
         b[i] = z
 
-    # Fit a cubic polynomial on tangent frame
+    # Fit a linear polynomial on tangent frame
     coefs = np.linalg.lstsq(A, b, rcond=None)[0]
 
     # Compute RMS error
     residual = np.linalg.norm(b - A.dot(coefs)) / np.sqrt(len(neighbors))
-    return residual
+    return coefs, residual
 
 
-def compute_sfitmap(vert: bmesh.types.BMVert, radii: np.ndarray):
-    """Compute the Scale fitmap for the given vertex."""
-    radii_errors = []
-    max_neighbors = get_neighbors_from_radius(vert, radii[-1])
-    for radius in radii:
-        neighbors_at_radius = [
-            n for n in max_neighbors if distance_vec(vert.co, n.co) < radius
-        ]
-        radius_error = compute_radius_error(neighbors_at_radius, vert)
-        radii_errors.append(radius_error)
+def compute_sfitmap(radii: np.ndarray, radii_errors: list) -> float:
+    """Compute the Scale fitmap from the given radii and errors."""
     # fit ax^2
     A = np.power(radii, 2).reshape(-1, 1)
     b = np.array(radii_errors)
@@ -1145,39 +1136,29 @@ def compute_sfitmap(vert: bmesh.types.BMVert, radii: np.ndarray):
     coefs = np.linalg.lstsq(A, b, rcond=None)[0]
     a = coefs[0]
 
-    # Add 1 to avoid 0 values that can cause issues to priority HEAP
-    vert[SFITMAP_LAYER] = np.sqrt(a)
+    return np.sqrt(a)
 
 
-def compute_mfitmap(vert: bmesh.types.BMVert, radii: np.ndarray, threshold=0.05):
+def compute_mfitmap(
+    plane_normal: Vector, face_neighbors: list[bmesh.types.BMFace], threshold=0.05
+) -> bool:
     """Compute the Maximal radius fitmap for the given vertex."""
-    max_neighbors = get_neighbors_from_radius(vert, radii[-1])
-    for radius in radii:
-        neighbors_at_radius = [
-            n for n in max_neighbors if distance_vec(vert.co, n.co) < radius
-        ]
-        vert_normal = vert.normal.normalized()
+    plane_normal = plane_normal.normalized()
+    consistent_faces, inconsistent_faces = 0, 0
+    for fneighbor in face_neighbors:
+        face_normal = fneighbor.normal.normalized()
+        scalar = plane_normal.dot(face_normal)
+        if scalar >= 0:
+            consistent_faces += fneighbor.calc_area()
+        else:
+            inconsistent_faces += fneighbor.calc_area()
 
-        consistent_faces = 0
-        inconsistent_faces = 0
-        face_neighbors = get_faces_neighbors_from_verts(
-            vert, neighbors_at_radius, radius
-        )
-        for fneighbor in face_neighbors:
-            face_normal = fneighbor.normal.normalized()
-            scalar = vert_normal.dot(face_normal)
-            if scalar >= 0:
-                consistent_faces += fneighbor.calc_area()
-            else:
-                inconsistent_faces += fneighbor.calc_area()
-
-        if consistent_faces + inconsistent_faces == 0:
-            continue
-        proportion = inconsistent_faces / (consistent_faces + inconsistent_faces)
-        if proportion >= threshold:
-            break
-
-        vert[MFITMAP_LAYER] = radius
+    if consistent_faces + inconsistent_faces == 0:
+        return False
+    proportion = inconsistent_faces / (consistent_faces + inconsistent_faces)
+    if proportion >= threshold:
+        return True
+    return False
 
 
 def compute_fitmaps():
@@ -1194,10 +1175,46 @@ def compute_fitmaps():
 
     len_verts = len(INITIAL_MESH.verts)
     for i, vert in enumerate(INITIAL_MESH.verts):
-        compute_sfitmap(vert, radii)
-        compute_mfitmap(vert, radii)
+        radii_errors = []
+        mfitmap_radius = None
 
-        if VERBOSE or i % 100 == 0:
+        max_neighbors = get_neighbors_from_radius(vert, radii[-1])
+        for i, radius in enumerate(radii):
+            neighbors_at_radius = [
+                n for n in max_neighbors if distance_vec(vert.co, n.co) < radius
+            ]
+
+            # -- Compute S-Fitmap --
+            coefs, radius_error = fit_polynomial(neighbors_at_radius, vert)
+            radii_errors.append(radius_error)
+
+            # -- Compute M-Fitmap --
+            if coefs is None or mfitmap_radius is not None:
+                continue
+            a1, a2, _ = coefs
+            plane_normal = Vector((a1, a2, -1)).normalized()
+
+            # Ensure the normal points outward
+            vert_normal = vert.normal.normalized()
+            if plane_normal.dot(vert_normal) < 0:
+                plane_normal = -plane_normal
+            plane_normal = (
+                vert_normal  # TODO: remove if you want to use the computed plane
+            )
+
+            face_neighbors = get_faces_neighbors_from_verts(
+                vert, neighbors_at_radius, radius
+            )
+            finished = compute_mfitmap(plane_normal, face_neighbors)
+            if finished:
+                mfitmap_radius = radii[i - 1] if i > 0 else 0
+
+        vert[SFITMAP_LAYER] = compute_sfitmap(radii, radii_errors)
+        vert[MFITMAP_LAYER] = (
+            mfitmap_radius if mfitmap_radius is not None else radii[-1]
+        )
+
+        if i % 100 == 0:
             print(f"Computed fitmaps for {i}/{len_verts}")
 
 
