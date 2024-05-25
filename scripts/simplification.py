@@ -895,26 +895,28 @@ def smooth_mesh(
     convergence_threshold = 0.001
 
     for i in range(relax_iter):
-        # Compute global `Mi` average length
-        average_length = np.mean([edge.calc_length() for edge in mesh.edges])
-        average_length_diag = np.sqrt(2) * average_length
-
-        # Compute the average forces of each vertex based on the average length
+        average_length = np.zeros(len(verts), dtype=float)
         average_forces = np.array([Vector((0.0, 0.0, 0.0))] * len(verts))
+
         for i, vert in enumerate(verts):
+            # Compute the average length of the direct edges
+            average_length[i] = np.mean(
+                [edge.calc_length() for edge in vert.link_edges]
+            )
+
             # Compute the force vector for each direct edge
             for edge in vert.link_edges:
                 other = edge.other_vert(vert)
                 force_vec = vert.co - other.co
                 average_forces[i] += force_vec.normalized() * (
-                    average_length - force_vec.length
+                    average_length[i] - force_vec.length
                 )
             # Compute the force vector for each diagonal edge
             diagonals = get_diagonal_vertices(vert)
             for diag in diagonals:
                 force_vec = vert.co - diag.co
                 average_forces[i] += force_vec.normalized() * (
-                    average_length_diag - force_vec.length
+                    np.sqrt(2) * average_length[i] - force_vec.length
                 )
 
         changed = False
@@ -926,7 +928,7 @@ def smooth_mesh(
                 if VERBOSE:
                     print("Warning: No closest position found")
                 continue
-            changed |= dist > (average_length * convergence_threshold)
+            changed |= dist > (average_length[i] * convergence_threshold)
             vert.co = closest_pos
 
         if not changed:
@@ -998,6 +1000,9 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         if not allow_collapse(face):
             continue
 
+        # if MESH_ITERATION == 800:
+        #     debug_here(mesh, [face])
+
         # -- Coarsening: Diagonal collapse --
         mid_vert = collapse_diagonal(mesh, face)
         mid_vert_faces = list(mid_vert.link_faces)
@@ -1018,8 +1023,6 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         if smooth_verts:
             smooth_mesh(mesh, smooth_verts, relax_iter=10)
             push_updated_faces(all_modified_faces_valid)
-        # if MESH_ITERATION == 50:
-        #     debug_here(mesh, modified_faces)
 
         if VERBOSE or MESH_ITERATION % 100 == 0:
             print(f"-- Iteration {MESH_ITERATION} done --")
