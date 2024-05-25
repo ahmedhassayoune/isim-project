@@ -957,7 +957,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
     while len(HEAP._data) > 0 and len(mesh.faces) > nb_faces:
         iteration_faces = len(mesh.faces)
 
-        min_diag, _, uid, face = HEAP.pop()
+        priority, _, uid, face = HEAP.pop()
 
         if not face.is_valid:
             total_invalid_faces += 1
@@ -967,7 +967,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         if occ is None:  # <-- Should not happen
             debug_here(mesh, [face])
 
-        if occ > 1 and min_diag != compute_min_diagonal_length(face):
+        if priority != compute_priority(face):
             total_outdated_faces += 1
             continue
 
@@ -998,8 +998,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         if smooth_verts:
             smooth_mesh(mesh, smooth_verts, relax_iter=10)
             push_updated_faces(all_modified_faces_valid)
-
-        # if MESH_ITERATION == 8:
+        # if MESH_ITERATION == 100:
         #     debug_here(mesh, all_modified_faces_valid)
 
         if VERBOSE or MESH_ITERATION % 100 == 0:
