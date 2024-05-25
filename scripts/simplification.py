@@ -768,8 +768,10 @@ def best_rotation(edge: bmesh.types.BMEdge, mid_vert: bmesh.types.BMVert) -> Rot
         return Rotation.NONE
 
     if (iBface1 + 1) % 4 != iAface1:
-        # Swap faces
+        # Swap faces and indices
         face1, face2 = face2, face1
+        iAface1, iAface2 = iAface2, iAface1
+        iBface1, iBface2 = iBface2, iBface1
 
     """
     we have by now the following configuration:
@@ -891,7 +893,7 @@ def smooth_mesh(
     mesh: bmesh.types.BMesh, verts: list[bmesh.types.BMVert], relax_iter: int = 10
 ):
     """Smooth the local zone of the given vertices with `relax_iter` iterations."""
-    euler_step = 0.1
+    euler_step = 0.05
     convergence_threshold = 0.001
 
     for i in range(relax_iter):
@@ -1000,9 +1002,6 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         if not allow_collapse(face):
             continue
 
-        # if MESH_ITERATION == 800:
-        #     debug_here(mesh, [face])
-
         # -- Coarsening: Diagonal collapse --
         mid_vert = collapse_diagonal(mesh, face)
         mid_vert_faces = list(mid_vert.link_faces)
@@ -1021,7 +1020,7 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
         smooth_verts = get_unique_verts(all_modified_faces_valid)
 
         if smooth_verts:
-            smooth_mesh(mesh, smooth_verts, relax_iter=10)
+            smooth_mesh(mesh, smooth_verts, relax_iter=5)
             push_updated_faces(all_modified_faces_valid)
 
         if VERBOSE or MESH_ITERATION % 100 == 0:
@@ -1147,7 +1146,7 @@ def compute_sfitmap(vert: bmesh.types.BMVert, radii: np.ndarray):
     a = coefs[0]
 
     # Add 1 to avoid 0 values that can cause issues to priority HEAP
-    vert[SFITMAP_LAYER] = np.sqrt(a) + 1
+    vert[SFITMAP_LAYER] = np.sqrt(a)
 
 
 def compute_mfitmap(vert: bmesh.types.BMVert, radii: np.ndarray, threshold=0.05):
