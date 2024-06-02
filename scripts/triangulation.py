@@ -3,6 +3,7 @@ import bmesh
 import mathutils
 from math import acos, cos, sin, sqrt
 
+
 def verticesInOrder(face: bmesh.types.BMFace) -> [bmesh.types.BMVert]:
     """
     Returns the list of vertices on the face so that two successive
@@ -20,15 +21,19 @@ def verticesInOrder(face: bmesh.types.BMFace) -> [bmesh.types.BMVert]:
 
         # Follow the edge to get the next vertex
         for edge in actualVertex.link_edges:
-            if edge in face.edges and edge.other_vert(actualVertex) not in verticesSorted:
+            if (
+                edge in face.edges
+                and edge.other_vert(actualVertex) not in verticesSorted
+            ):
                 actualVertex = edge.other_vert(actualVertex)
                 break
 
     return verticesSorted
 
+
 def inTriangle(
     point: mathutils.Vector,
-    triangle: (mathutils.Vector, mathutils.Vector, mathutils.Vector)
+    triangle: (mathutils.Vector, mathutils.Vector, mathutils.Vector),
 ) -> bool:
     """
     Returns if point is in the theoric triangle formed by the
@@ -59,10 +64,9 @@ def inTriangle(
         m = AP.x / AC.x
         k = (AP.y - m * AC.y) / AB.y
 
-
     # | xAP = k * xAB + m * xAC <=> | (xAP - m * xAC) / xAB = k
     # | yAP = k * yAB + m * yAC     | yAP = k * yAB + m * yAC
-    
+
     # yAP = {(xAP - m * xAC) / xAB} * yAB + m * yAC <=>
     # yAP = xAP * yAB/xAB - m * xAC * yAB/xAB + m * yAC <=>
     # yAP - xAP * yAB/xAB =  m (yAC - xAC * yAB/xAB) <=>
@@ -70,17 +74,22 @@ def inTriangle(
         # AB and AC are colinear
         # | xAP = (k + m * k') * xAB
         # | yAP = (k + m * k') * yAB
-        return AP.x * AB.y == AB.x * AP.y and min(AB.x, AC.x) < AP.x and AP.x < max(AB.x, AC.x)
+        return (
+            AP.x * AB.y == AB.x * AP.y
+            and min(AB.x, AC.x) < AP.x
+            and AP.x < max(AB.x, AC.x)
+        )
     else:
         m = (AP.y - AP.x * AB.y / AB.x) / (AC.y - AC.x * AB.y / AB.x)
         k = (AP.x - m * AC.x) / AB.x
-    
+
     return k >= 0 and m >= 0 and k + m <= 1
+
 
 def recTriangulation(
     coords: [(mathutils.Vector, bmesh.types.BMVert)],
     trianglesToAdd: [[bmesh.types.BMVert]],
-    biggestYUnknown: bool = True
+    biggestYUnknown: bool = True,
 ):
     """
     Recursive implementation of the triangulation of the face represented by coords based on the two ears theorem.
@@ -98,7 +107,7 @@ def recTriangulation(
     size = len(coords)
 
     # -- If the face has three vertices, the triangulation is over --
-    
+
     if size == 3:
         _, p0 = coords[0]
         _, p1 = coords[1]
@@ -108,7 +117,7 @@ def recTriangulation(
 
     if biggestYUnknown:
         # -- Take the point with the biggest Y value --
-        
+
         iMax, yMax = None, None
         for i in range(size):
             coord, vert = coords[i]
@@ -146,9 +155,10 @@ def recTriangulation(
     else:
         # The point with the biggest Y value is still in the list:
         # No need to recalculate it.
-        recTriangulation(coords[:intersection+1], trianglesToAdd, False)
+        recTriangulation(coords[: intersection + 1], trianglesToAdd, False)
         recTriangulation([coords[0]] + coords[intersection:], trianglesToAdd, False)
         return
+
 
 def triangulation(mesh: bmesh.types.BMesh) -> bmesh.types.BMesh:
     """
@@ -198,7 +208,7 @@ def triangulation(mesh: bmesh.types.BMesh) -> bmesh.types.BMesh:
         # Translation to put the first vertex as the origin
         origin, _ = coords[0]
         origin = origin.copy()
-        if origin.x != 0 or origin.y != 0 or origin.z != 0 :
+        if origin.x != 0 or origin.y != 0 or origin.z != 0:
             for coord, _ in coords:
                 coord -= origin
 
@@ -208,8 +218,14 @@ def triangulation(mesh: bmesh.types.BMesh) -> bmesh.types.BMesh:
         toAxisX, _ = coords[1]
         if toAxisX.y != 0 or toAxisX.z != 0:
             normalBX = mathutils.Vector((0, toAxisX.z, -toAxisX.y)).normalized()
-            angle = acos( toAxisX.x / toAxisX.length )
-            Q_BX = mathutils.Matrix([[0, -normalBX.z, normalBX.y], [normalBX.z, 0, -normalBX.x], [-normalBX.y, normalBX.x, 0]])
+            angle = acos(toAxisX.x / toAxisX.length)
+            Q_BX = mathutils.Matrix(
+                [
+                    [0, -normalBX.z, normalBX.y],
+                    [normalBX.z, 0, -normalBX.x],
+                    [-normalBX.y, normalBX.x, 0],
+                ]
+            )
             R_BX += sin(angle) * Q_BX + (1 - cos(angle)) * (Q_BX @ Q_BX)
 
         # Rotation to put the third vertex on the XY plane
@@ -221,7 +237,9 @@ def triangulation(mesh: bmesh.types.BMesh) -> bmesh.types.BMesh:
             sqrtYZ = sqrt(new_C.y * new_C.y + new_C.z * new_C.z)
             Y_sqrt = new_C.y / sqrtYZ
             Z_sqrt = new_C.z / sqrtYZ
-            R_CX = mathutils.Matrix([[1, 0, 0], [0, Y_sqrt, Z_sqrt], [0, Z_sqrt, -Y_sqrt]])
+            R_CX = mathutils.Matrix(
+                [[1, 0, 0], [0, Y_sqrt, Z_sqrt], [0, Z_sqrt, -Y_sqrt]]
+            )
 
         R = R_CX @ R_BX
 
@@ -244,6 +262,7 @@ def triangulation(mesh: bmesh.types.BMesh) -> bmesh.types.BMesh:
 
     return mesh
 
+
 if __name__ == "__main__":
     # Get the active mesh
     me = bpy.context.object.data
@@ -257,5 +276,5 @@ if __name__ == "__main__":
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
     bm.free()  # free and prevent further access
-    
+
     me.update()
