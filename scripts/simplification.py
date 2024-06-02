@@ -1,4 +1,5 @@
 import heapq
+import logging
 from enum import Enum
 from queue import Queue
 from typing import Union
@@ -318,6 +319,7 @@ class MyHeap(object):
         return elem
 
 
+# -- Utility functions
 def distance_vec(point1: Vector, point2: Vector) -> float:
     """Calculate distance between two points."""
     return (point2 - point1).length
@@ -376,71 +378,6 @@ def compute_barycentric_coordinates(
     return inside, gamma, alpha, beta
 
 
-def interpolate_fitmap(face: bmesh.types.BMFace, point: Vector, fitmap_layer: str):
-    """Interpolate the fitmap value of the given face at the given point."""
-    # Fetch projected point and associated face on the source mesh M0 by casting 2 opposite rays
-    projected, _, face_idx, dist = BVH.ray_cast(point, face.normal.normalized())
-    projected_opp, _, face_idx_opp, dist_opp = BVH.ray_cast(
-        point, -face.normal.normalized()
-    )
-
-    # Handle case where no hit position is found
-    if not projected and not projected_opp:
-        raise Exception("Warning: No hit position or normal")
-
-    if dist is None:
-        dist = float("inf")
-    if dist_opp is None:
-        dist_opp = float("inf")
-    # Get the closest hit position to the mid-vertex
-    if dist_opp < dist:
-        projected = projected_opp
-        face_idx = face_idx_opp
-
-    INITIAL_MESH.faces.ensure_lookup_table()
-    target_face = INITIAL_MESH.faces[face_idx]
-    if VERBOSE and len(target_face.verts) != 4:
-        raise Exception("Warning: Face is not a quad")
-
-    tri_ABC = [
-        target_face.verts[0],
-        target_face.verts[1],
-        target_face.verts[2],
-    ]
-    tri_ACD = [
-        target_face.verts[0],
-        target_face.verts[2],
-        target_face.verts[3],
-    ]
-    tri_ABD = [
-        target_face.verts[0],
-        target_face.verts[1],
-        target_face.verts[3],
-    ]
-    tri_BCD = [
-        target_face.verts[1],
-        target_face.verts[2],
-        target_face.verts[3],
-    ]
-    triangles = [tri_ABC, tri_ACD, tri_ABD, tri_BCD]
-
-    for triangle in triangles:
-        inside, *scalars = compute_barycentric_coordinates(projected, triangle)
-        if inside:
-            return (
-                scalars[0] * triangle[0][fitmap_layer]
-                + scalars[1] * triangle[1][fitmap_layer]
-                + scalars[2] * triangle[2][fitmap_layer]
-            )
-
-    # Return last triangle in any case <-- Not reached normalement
-    return (
-        scalars[0] * triangles[-1][0][fitmap_layer]
-        + scalars[1] * triangles[-1][1][fitmap_layer]
-        + scalars[2] * triangles[-1][2][fitmap_layer]
-    )
-
-
 def compute_priority(face: bmesh.types.BMFace) -> float:
     """Compute the priority of the given face."""
     v1, v2, v3, v4 = face.verts
@@ -460,6 +397,64 @@ def compute_priority(face: bmesh.types.BMFace) -> float:
     return diag_len * interpolated_sfitmap
 
 
+def fit_polynomial(neighbors: list, vert: bmesh.types.BMVert) -> tuple:
+    if len(neighbors) < 3:
+        return None, 0
+
+    yaxis = Vector((0.0, 1.0, 0.0))
+    zaxis = Vector((0.0, 0.0, 1.0))
+    normal = vert.normal.normalized()
+    u = normal.cross(zaxis) if normal != zaxis else normal.cross(yaxis)
+    u = u.normalized()
+    v = normal.cross(u)
+    v = v.normalized()
+
+    A = np.zeros((len(neighbors), 3))
+    b = np.zeros(len(neighbors))
+
+    for i, neighbor in enumerate(neighbors):
+        diff = neighbor.co - vert.co
+
+        # Projection on local tangent frame
+        x = diff.dot(u)
+        y = diff.dot(v)
+        z = diff.dot(normal)
+
+        A[i] = np.array([x, y, 1])
+        b[i] = z
+
+    # Fit a linear polynomial on tangent frame
+    coefs = np.linalg.lstsq(A, b, rcond=None)[0]
+
+    # Compute RMS error
+    residual = np.linalg.norm(b - A.dot(coefs)) / np.sqrt(len(neighbors))
+    return coefs, residual
+
+
+def debug_here(
+    bm: bmesh.types.BMesh,
+    elements: list[
+        Union[bmesh.types.BMVert, bmesh.types.BMEdge, bmesh.types.BMFace]
+    ] = [],
+):
+    obj = bpy.context.object
+
+    bpy.context.view_layer.objects.active = obj
+    bpy.ops.object.mode_set(mode="EDIT")
+    for face in bm.faces:
+        face.select_set(False)
+    for element in elements:
+        element.select_set(True)
+
+    bpy.ops.object.mode_set(mode="OBJECT")
+    bm.to_mesh(obj.data)
+    bm.free()
+
+    # terminate the script
+    raise Exception("Debug here")
+
+
+# -- Mesh Simplification Functions
 def build_bvh_tree():
     """Build a BVH tree for the given mesh."""
     global BVH
@@ -944,6 +939,245 @@ def smooth_mesh(
     mesh.normal_update()
 
 
+def get_neighbors_from_radius(vert: bmesh.types.BMVert, radius: float) -> list:
+    """Get the neighbors of the given vertex within the given radius."""
+    neighbors = []
+    visited = set()
+    visited.add(vert.index)
+
+    q = Queue()
+    for edge in vert.link_edges:
+        other = edge.other_vert(vert)
+        q.put(other)
+    while not q.empty():
+        current = q.get()
+        if current.index in visited:
+            continue
+        visited.add(current.index)
+        neighbors.append(current)
+        for edge in current.link_edges:
+            other = edge.other_vert(current)
+            if distance_vec(vert.co, other.co) < radius:
+                q.put(other)
+    return neighbors
+
+
+def get_faces_neighbors_from_verts(
+    vert: bmesh.types.BMVert, verts_neighbors: list, radius: float
+) -> list:
+    """Get the faces neighbors of the given vertex within the given radius."""
+    visited = set()
+    neighbor_faces = []
+    for nvert in verts_neighbors:
+        faces = nvert.link_faces
+        for face in faces:
+            if face.index in visited:
+                continue
+            for fvert in face.verts:
+                if distance_vec(vert.co, fvert.co) > radius:
+                    visited.add(face.index)
+                    break
+            if face.index not in visited:
+                neighbor_faces.append(face)
+                visited.add(face.index)
+
+    return neighbor_faces
+
+
+# -- Fitmap Computation and Visualization Functions
+def interpolate_fitmap(face: bmesh.types.BMFace, point: Vector, fitmap_layer: str):
+    """Interpolate the fitmap value of the given face at the given point."""
+    # Fetch projected point and associated face on the source mesh M0 by casting 2 opposite rays
+    projected, _, face_idx, dist = BVH.ray_cast(point, face.normal.normalized())
+    projected_opp, _, face_idx_opp, dist_opp = BVH.ray_cast(
+        point, -face.normal.normalized()
+    )
+
+    # Handle case where no hit position is found
+    if not projected and not projected_opp:
+        raise Exception("Warning: No hit position or normal")
+
+    if dist is None:
+        dist = float("inf")
+    if dist_opp is None:
+        dist_opp = float("inf")
+    # Get the closest hit position to the mid-vertex
+    if dist_opp < dist:
+        projected = projected_opp
+        face_idx = face_idx_opp
+
+    INITIAL_MESH.faces.ensure_lookup_table()
+    target_face = INITIAL_MESH.faces[face_idx]
+    if VERBOSE and len(target_face.verts) != 4:
+        raise Exception("Warning: Face is not a quad")
+
+    tri_ABC = [
+        target_face.verts[0],
+        target_face.verts[1],
+        target_face.verts[2],
+    ]
+    tri_ACD = [
+        target_face.verts[0],
+        target_face.verts[2],
+        target_face.verts[3],
+    ]
+    tri_ABD = [
+        target_face.verts[0],
+        target_face.verts[1],
+        target_face.verts[3],
+    ]
+    tri_BCD = [
+        target_face.verts[1],
+        target_face.verts[2],
+        target_face.verts[3],
+    ]
+    triangles = [tri_ABC, tri_ACD, tri_ABD, tri_BCD]
+
+    for triangle in triangles:
+        inside, *scalars = compute_barycentric_coordinates(projected, triangle)
+        if inside:
+            return (
+                scalars[0] * triangle[0][fitmap_layer]
+                + scalars[1] * triangle[1][fitmap_layer]
+                + scalars[2] * triangle[2][fitmap_layer]
+            )
+
+    # Return last triangle in any case <-- Not reached normalement
+    return (
+        scalars[0] * triangles[-1][0][fitmap_layer]
+        + scalars[1] * triangles[-1][1][fitmap_layer]
+        + scalars[2] * triangles[-1][2][fitmap_layer]
+    )
+
+
+def compute_sfitmap(radii: np.ndarray, radii_errors: list) -> float:
+    """Compute the Scale fitmap from the given radii and errors."""
+    # fit ax^2
+    A = np.power(radii, 2).reshape(-1, 1)
+    b = np.array(radii_errors)
+
+    coefs = np.linalg.lstsq(A, b, rcond=None)[0]
+    a = coefs[0]
+
+    return np.sqrt(a)
+
+
+def compute_mfitmap(
+    plane_normal: Vector, face_neighbors: list[bmesh.types.BMFace], threshold=0.05
+) -> bool:
+    """Compute the Maximal radius fitmap for the given vertex."""
+    plane_normal = plane_normal.normalized()
+    consistent_faces, inconsistent_faces = 0, 0
+    for fneighbor in face_neighbors:
+        face_normal = fneighbor.normal.normalized()
+        scalar = plane_normal.dot(face_normal)
+        if scalar >= 0:
+            consistent_faces += fneighbor.calc_area()
+        else:
+            inconsistent_faces += fneighbor.calc_area()
+
+    if consistent_faces + inconsistent_faces == 0:
+        return False
+    proportion = inconsistent_faces / (consistent_faces + inconsistent_faces)
+    if proportion >= threshold:
+        return True
+    return False
+
+
+def compute_fitmaps():
+    """Compute the Scale and Maximal radius fitmaps for the given mesh."""
+    global SFITMAP_LAYER, MFITMAP_LAYER
+    SFITMAP_LAYER = INITIAL_MESH.verts.layers.float.new("sfitmap")
+    MFITMAP_LAYER = INITIAL_MESH.verts.layers.float.new("mfitmap")
+
+    avg_edges_length = np.mean([edge.calc_length() for edge in INITIAL_MESH.edges])
+    max_radii = 5
+
+    r0 = avg_edges_length
+    radii = np.array([r0 * (1 + i) for i in range(max_radii)])
+
+    len_verts = len(INITIAL_MESH.verts)
+    for i, vert in enumerate(INITIAL_MESH.verts):
+        radii_errors = []
+        mfitmap_radius = None
+
+        max_neighbors = get_neighbors_from_radius(vert, radii[-1])
+        for j, radius in enumerate(radii):
+            neighbors_at_radius = [
+                n for n in max_neighbors if distance_vec(vert.co, n.co) < radius
+            ]
+
+            # -- Compute S-Fitmap --
+            coefs, radius_error = fit_polynomial(neighbors_at_radius, vert)
+            radii_errors.append(radius_error)
+
+            # -- Compute M-Fitmap --
+            if coefs is None or mfitmap_radius is not None:
+                continue
+            a1, a2, _ = coefs
+            plane_normal = Vector((a1, a2, -1)).normalized()
+
+            # Ensure the normal points outward
+            vert_normal = vert.normal.normalized()
+            if plane_normal.dot(vert_normal) < 0:
+                plane_normal = -plane_normal
+            # plane_normal = vert_normal
+
+            face_neighbors = get_faces_neighbors_from_verts(
+                vert, neighbors_at_radius, radius
+            )
+            finished = compute_mfitmap(plane_normal, face_neighbors)
+            if finished:
+                mfitmap_radius = radii[j - 1] if j > 0 else 0
+
+        vert[SFITMAP_LAYER] = compute_sfitmap(radii, radii_errors)
+        vert[MFITMAP_LAYER] = (
+            mfitmap_radius if mfitmap_radius is not None else radii[-1]
+        )
+
+        if i % 100 == 0:
+            print(f"Computed fitmaps for {i}/{len_verts}")
+
+
+def visualize_fitmap(sfitmap: bool = True):
+    """Color the vertices of the given mesh based on the given fitmap layer."""
+    # Get the active mesh
+    mesh = bpy.context.object.data
+
+    bpy.ops.object.mode_set(mode="EDIT")
+
+    # Get a BMesh representation
+    bm = bmesh.from_edit_mesh(mesh)
+    global INITIAL_MESH
+    INITIAL_MESH = bm
+
+    compute_fitmaps()
+    fitmap_layer = SFITMAP_LAYER if sfitmap else MFITMAP_LAYER
+
+    # Get the min and max values of the fitmap
+    min_val = min([v[fitmap_layer] for v in bm.verts])
+    max_val = max([v[fitmap_layer] for v in bm.verts])
+
+    point_color_attribute = mesh.color_attributes.get(
+        "FitmapColors"
+    ) or mesh.color_attributes.new(
+        name="FitmapColors", type="BYTE_COLOR", domain="POINT"
+    )
+    point_color_layer = bm.verts.layers.color[point_color_attribute.name]
+    # Compute the normalized fitmap values
+    for vert in bm.verts:
+        normalized_val = (vert[fitmap_layer] - min_val) / (max_val - min_val)
+        color = turbo_colormap[int(normalized_val * 255)]
+        vert[point_color_layer] = (
+            color[0],
+            color[1],
+            color[2],
+            1,
+        )  # Set Point Colors
+    bmesh.update_edit_mesh(mesh)
+    bpy.ops.object.mode_set(mode="OBJECT")
+
+
 def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
     """
     Apply quad mesh simplification to reduce the number of faces in the given BMesh object.
@@ -1029,260 +1263,37 @@ def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
             push_updated_faces(all_modified_faces_valid)
 
         if VERBOSE or MESH_ITERATION % 100 == 0:
-            print(f"-- Iteration {MESH_ITERATION} done --")
-            print(f"-> Total faces = {len(mesh.faces)}")
-            print(f"-> Total removed faces = {initial_mesh_faces - len(mesh.faces)}")
-            print(
+            logging.info(f"-- Iteration {MESH_ITERATION} done --")
+            logging.info(f"-> Total faces = {len(mesh.faces)}")
+            logging.info(
+                f"-> Total removed faces = {initial_mesh_faces - len(mesh.faces)}"
+            )
+            logging.info(
                 f"-> Total removed faces (in iter) = {iteration_faces - len(mesh.faces)}"
             )
-            print(f"-> Heap size = {len(HEAP._data)}")
+            logging.info(f"-> Heap size = {len(HEAP._data)}")
 
         MESH_ITERATION += 1
 
-    print("\n--- # Simplification DONE # ---")
-    print(f"Final number of faces: {len(mesh.faces)}")
-    print(f"Heap size: {len(HEAP._data)}")
-    print(f"Total iterations: {MESH_ITERATION}")
-    print()
-    print("--- # Stats # ---")
-    print(f"Total removed faces: {initial_mesh_faces - len(mesh.faces)}")
-    print(f"Total invalid faces: {total_invalid_faces}")
-    print(f"Total outdated faces: {total_outdated_faces}")
-    print(f"Total non-quad faces: {total_non_quad_faces}")
+    logging.info("\n--- # Simplification DONE # ---")
+    logging.info(f"Final number of faces: {len(mesh.faces)}")
+    logging.info(f"Heap size: {len(HEAP._data)}")
+    logging.info(f"Total iterations: {MESH_ITERATION}")
+    logging.info("\n--- # Stats # ---")
+    logging.info(f"Total removed faces: {initial_mesh_faces - len(mesh.faces)}")
+    logging.info(f"Total invalid faces: {total_invalid_faces}")
+    logging.info(f"Total outdated faces: {total_outdated_faces}")
+    logging.info(f"Total non-quad faces: {total_non_quad_faces}")
 
     return mesh
 
 
-def get_neighbors_from_radius(vert: bmesh.types.BMVert, radius: float) -> list:
-    """Get the neighbors of the given vertex within the given radius."""
-    neighbors = []
-    visited = set()
-    visited.add(vert.index)
-
-    q = Queue()
-    for edge in vert.link_edges:
-        other = edge.other_vert(vert)
-        q.put(other)
-    while not q.empty():
-        current = q.get()
-        if current.index in visited:
-            continue
-        visited.add(current.index)
-        neighbors.append(current)
-        for edge in current.link_edges:
-            other = edge.other_vert(current)
-            if distance_vec(vert.co, other.co) < radius:
-                q.put(other)
-    return neighbors
-
-
-def get_faces_neighbors_from_verts(
-    vert: bmesh.types.BMVert, verts_neighbors: list, radius: float
-) -> list:
-    """Get the faces neighbors of the given vertex within the given radius."""
-    visited = set()
-    neighbor_faces = []
-    for nvert in verts_neighbors:
-        faces = nvert.link_faces
-        for face in faces:
-            if face.index in visited:
-                continue
-            for fvert in face.verts:
-                if distance_vec(vert.co, fvert.co) > radius:
-                    visited.add(face.index)
-                    break
-            if face.index not in visited:
-                neighbor_faces.append(face)
-                visited.add(face.index)
-
-    return neighbor_faces
-
-
-def fit_polynomial(neighbors: list, vert: bmesh.types.BMVert) -> tuple:
-    if len(neighbors) < 3:
-        return None, 0
-
-    yaxis = Vector((0.0, 1.0, 0.0))
-    zaxis = Vector((0.0, 0.0, 1.0))
-    normal = vert.normal.normalized()
-    u = normal.cross(zaxis) if normal != zaxis else normal.cross(yaxis)
-    u = u.normalized()
-    v = normal.cross(u)
-    v = v.normalized()
-
-    A = np.zeros((len(neighbors), 3))
-    b = np.zeros(len(neighbors))
-
-    for i, neighbor in enumerate(neighbors):
-        diff = neighbor.co - vert.co
-
-        # Projection on local tangent frame
-        x = diff.dot(u)
-        y = diff.dot(v)
-        z = diff.dot(normal)
-
-        A[i] = np.array([x, y, 1])
-        b[i] = z
-
-    # Fit a linear polynomial on tangent frame
-    coefs = np.linalg.lstsq(A, b, rcond=None)[0]
-
-    # Compute RMS error
-    residual = np.linalg.norm(b - A.dot(coefs)) / np.sqrt(len(neighbors))
-    return coefs, residual
-
-
-def compute_sfitmap(radii: np.ndarray, radii_errors: list) -> float:
-    """Compute the Scale fitmap from the given radii and errors."""
-    # fit ax^2
-    A = np.power(radii, 2).reshape(-1, 1)
-    b = np.array(radii_errors)
-
-    coefs = np.linalg.lstsq(A, b, rcond=None)[0]
-    a = coefs[0]
-
-    return np.sqrt(a)
-
-
-def compute_mfitmap(
-    plane_normal: Vector, face_neighbors: list[bmesh.types.BMFace], threshold=0.05
-) -> bool:
-    """Compute the Maximal radius fitmap for the given vertex."""
-    plane_normal = plane_normal.normalized()
-    consistent_faces, inconsistent_faces = 0, 0
-    for fneighbor in face_neighbors:
-        face_normal = fneighbor.normal.normalized()
-        scalar = plane_normal.dot(face_normal)
-        if scalar >= 0:
-            consistent_faces += fneighbor.calc_area()
-        else:
-            inconsistent_faces += fneighbor.calc_area()
-
-    if consistent_faces + inconsistent_faces == 0:
-        return False
-    proportion = inconsistent_faces / (consistent_faces + inconsistent_faces)
-    if proportion >= threshold:
-        return True
-    return False
-
-
-def compute_fitmaps():
-    """Compute the Scale and Maximal radius fitmaps for the given mesh."""
-    global SFITMAP_LAYER, MFITMAP_LAYER
-    SFITMAP_LAYER = INITIAL_MESH.verts.layers.float.new("sfitmap")
-    MFITMAP_LAYER = INITIAL_MESH.verts.layers.float.new("mfitmap")
-
-    avg_edges_length = np.mean([edge.calc_length() for edge in INITIAL_MESH.edges])
-    max_radii = 5
-
-    r0 = avg_edges_length
-    radii = np.array([r0 * (1 + i) for i in range(max_radii)])
-
-    len_verts = len(INITIAL_MESH.verts)
-    for i, vert in enumerate(INITIAL_MESH.verts):
-        radii_errors = []
-        mfitmap_radius = None
-
-        max_neighbors = get_neighbors_from_radius(vert, radii[-1])
-        for j, radius in enumerate(radii):
-            neighbors_at_radius = [
-                n for n in max_neighbors if distance_vec(vert.co, n.co) < radius
-            ]
-
-            # -- Compute S-Fitmap --
-            coefs, radius_error = fit_polynomial(neighbors_at_radius, vert)
-            radii_errors.append(radius_error)
-
-            # -- Compute M-Fitmap --
-            if coefs is None or mfitmap_radius is not None:
-                continue
-            a1, a2, _ = coefs
-            plane_normal = Vector((a1, a2, -1)).normalized()
-
-            # Ensure the normal points outward
-            vert_normal = vert.normal.normalized()
-            if plane_normal.dot(vert_normal) < 0:
-                plane_normal = -plane_normal
-
-            face_neighbors = get_faces_neighbors_from_verts(
-                vert, neighbors_at_radius, radius
-            )
-            finished = compute_mfitmap(plane_normal, face_neighbors)
-            if finished:
-                mfitmap_radius = radii[j - 1] if j > 0 else 0
-
-        vert[SFITMAP_LAYER] = compute_sfitmap(radii, radii_errors)
-        vert[MFITMAP_LAYER] = (
-            mfitmap_radius if mfitmap_radius is not None else radii[-1]
-        )
-
-        if i % 100 == 0:
-            print(f"Computed fitmaps for {i}/{len_verts}")
-
-
-def debug_here(
-    bm: bmesh.types.BMesh,
-    elements: list[
-        Union[bmesh.types.BMVert, bmesh.types.BMEdge, bmesh.types.BMFace]
-    ] = [],
-):
-    obj = bpy.context.object
-
-    bpy.context.view_layer.objects.active = obj
-    bpy.ops.object.mode_set(mode="EDIT")
-    for face in bm.faces:
-        face.select_set(False)
-    for element in elements:
-        element.select_set(True)
-
-    bpy.ops.object.mode_set(mode="OBJECT")
-    bm.to_mesh(obj.data)
-    bm.free()
-
-    # terminate the script
-    raise Exception("Debug here")
-
-
-def visualize_fitmap(sfitmap: bool = True):
-    """Color the vertices of the given mesh based on the given fitmap layer."""
-    # Get the active mesh
-    mesh = bpy.context.object.data
-
-    bpy.ops.object.mode_set(mode="EDIT")
-
-    # Get a BMesh representation
-    bm = bmesh.from_edit_mesh(mesh)
-    global INITIAL_MESH
-    INITIAL_MESH = bm
-
-    compute_fitmaps()
-    fitmap_layer = SFITMAP_LAYER if sfitmap else MFITMAP_LAYER
-
-    # Get the min and max values of the fitmap
-    min_val = min([v[fitmap_layer] for v in bm.verts])
-    max_val = max([v[fitmap_layer] for v in bm.verts])
-
-    point_color_attribute = mesh.color_attributes.get(
-        "FitmapColors"
-    ) or mesh.color_attributes.new(
-        name="FitmapColors", type="BYTE_COLOR", domain="POINT"
-    )
-    point_color_layer = bm.verts.layers.color[point_color_attribute.name]
-    # Compute the normalized fitmap values
-    for vert in bm.verts:
-        normalized_val = (vert[fitmap_layer] - min_val) / (max_val - min_val)
-        color = turbo_colormap[int(normalized_val * 255)]
-        vert[point_color_layer] = (
-            color[0],
-            color[1],
-            color[2],
-            1,
-        )  # Set Point Colors
-    bmesh.update_edit_mesh(mesh)
-    bpy.ops.object.mode_set(mode="OBJECT")
-
-
 if __name__ == "__main__":
+    # Set up logging configuration
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
+    )
+
     global VERBOSE
     VERBOSE = False
 
