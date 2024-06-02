@@ -464,37 +464,24 @@ def interpolate_fitmap(
         target_face.verts[1],
         target_face.verts[2],
     ]
+    inside, *scalars = compute_barycentric_coordinates(projected, tri_ABC)
+    if inside:
+        return (
+            scalars[0] * tri_ABC[0][fitmap_layer]
+            + scalars[1] * tri_ABC[1][fitmap_layer]
+            + scalars[2] * tri_ABC[2][fitmap_layer]
+        )
+
     tri_ACD = [
         target_face.verts[0],
         target_face.verts[2],
         target_face.verts[3],
     ]
-    tri_ABD = [
-        target_face.verts[0],
-        target_face.verts[1],
-        target_face.verts[3],
-    ]
-    tri_BCD = [
-        target_face.verts[1],
-        target_face.verts[2],
-        target_face.verts[3],
-    ]
-    triangles = [tri_ABC, tri_ACD, tri_ABD, tri_BCD]
-
-    for triangle in triangles:
-        inside, *scalars = compute_barycentric_coordinates(projected, triangle)
-        if inside:
-            return (
-                scalars[0] * triangle[0][fitmap_layer]
-                + scalars[1] * triangle[1][fitmap_layer]
-                + scalars[2] * triangle[2][fitmap_layer]
-            )
-
-    # Return last triangle in any case <-- Not reached normalement
+    _, *scalars = compute_barycentric_coordinates(projected, tri_ACD)
     return (
-        scalars[0] * triangles[-1][0][fitmap_layer]
-        + scalars[1] * triangles[-1][1][fitmap_layer]
-        + scalars[2] * triangles[-1][2][fitmap_layer]
+        scalars[0] * tri_ACD[0][fitmap_layer]
+        + scalars[1] * tri_ACD[1][fitmap_layer]
+        + scalars[2] * tri_ACD[2][fitmap_layer]
     )
 
 
@@ -505,6 +492,8 @@ def compute_priority(
     sfitmap_layer: int,
 ) -> float:
     """Compute the priority of the given face."""
+    if len(face.verts) != 4:
+        return float("inf")
     v1, v2, v3, v4 = face.verts
     diag1_len = distance_vec(v1.co, v3.co)
     diag2_len = distance_vec(v2.co, v4.co)

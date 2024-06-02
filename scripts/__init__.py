@@ -8,12 +8,16 @@ bl_info = {
     "category": "Object Transform",
 }
 
+from importlib import reload  # needed to import classes from other files
+
 import bmesh
 import bpy
 
-from .simplification import MeshSimplifier
-from .tri_to_quad import triToQuad
-from .triangulation import triangulation
+import scripts.simplification as simplification
+from scripts.tri_to_quad import triToQuad
+from scripts.triangulation import triangulation
+
+reload(simplification)
 
 
 class OBJECT_OT_adaptive_quad_mesh_simplification(bpy.types.Operator):
@@ -36,13 +40,10 @@ class OBJECT_OT_adaptive_quad_mesh_simplification(bpy.types.Operator):
         description="Factor for the mesh simplification",
         default=0,
         min=0,
-        max=60000,
+        max=40000,
     )
 
     def execute(self, context):
-        global VERBOSE
-        VERBOSE = self.simplification_verbose_bool
-
         # Get the active mesh
         obj = context.object
         if obj is None or obj.type != "MESH":
@@ -60,7 +61,7 @@ class OBJECT_OT_adaptive_quad_mesh_simplification(bpy.types.Operator):
         if self.tri_to_quad_bool:
             bm = triToQuad(bm)
         if self.simplification_bool:
-            bm = MeshSimplifier(
+            bm = simplification.MeshSimplifier(
                 bm, verbose=self.simplification_verbose_bool
             ).simplify_mesh(nb_faces=self.simplification_factor)
 
