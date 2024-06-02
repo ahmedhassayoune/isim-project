@@ -270,7 +270,7 @@ turbo_colormap = [
 
 
 class Rotation(Enum):
-    """Enum class for rotation."""
+    """Enum class for rotation types."""
 
     NONE = 0
     CW = 1
@@ -295,8 +295,9 @@ class MyHeap(object):
             heapq.heapify(self._data)
 
     def push(self, item: bmesh.types.BMFace):
-        # if len(item.verts) != 4:  # TODO: Should not happen
-        #     return None
+        """Push an item to the heap."""
+        if len(item.verts) != 4:
+            return
         if item[UID_LAYER] == 0:  # New item
             elem_uuid = uuid4().bytes
             item[UID_LAYER] = elem_uuid
@@ -310,6 +311,7 @@ class MyHeap(object):
         self.index += 1
 
     def pop(self):
+        """Pop the item with the highest priority from the heap."""
         elem = heapq.heappop(self._data)
         elem_uuid = elem[2]
         HEAP_ELEM_OCC[elem_uuid] -= 1
@@ -378,10 +380,8 @@ def interpolate_fitmap(face: bmesh.types.BMFace, point: Vector, fitmap_layer: st
     """Interpolate the fitmap value of the given face at the given point."""
     # Fetch projected point and associated face on the source mesh M0 by casting 2 opposite rays
     projected, _, face_idx, dist = BVH.ray_cast(point, face.normal.normalized())
-    projected_opp, _, face_idx_opp, dist_opp = (
-        BVH.ray_cast(  # TODO: pas sur sur les directions
-            point, -face.normal.normalized()
-        )
+    projected_opp, _, face_idx_opp, dist_opp = BVH.ray_cast(
+        point, -face.normal.normalized()
     )
 
     # Handle case where no hit position is found
@@ -443,10 +443,6 @@ def interpolate_fitmap(face: bmesh.types.BMFace, point: Vector, fitmap_layer: st
 
 def compute_priority(face: bmesh.types.BMFace) -> float:
     """Compute the priority of the given face."""
-    if len(face.verts) != 4:  # TODO: is this condition necessary in all code
-        if VERBOSE:
-            print("Warning: Face is not a quad")
-        return float("inf")
     v1, v2, v3, v4 = face.verts
     diag1_len = distance_vec(v1.co, v3.co)
     diag2_len = distance_vec(v2.co, v4.co)
@@ -737,7 +733,16 @@ def is_valid_rotation(
 
 
 def best_rotation(edge: bmesh.types.BMEdge, mid_vert: bmesh.types.BMVert) -> Rotation:
-    """Determine the best rotation for the given edge."""
+    """
+    Determine the best rotation for the given edge.
+
+    Parameters:
+    edge (bmesh.types.BMEdge): The edge to evaluate.
+    mid_vert (bmesh.types.BMVert): The mid vertex associated with the edge.
+
+    Returns:
+    Rotation: The optimal rotation for the edge.
+    """
     if not edge.is_valid:
         return Rotation.NONE
 
@@ -764,7 +769,7 @@ def best_rotation(edge: bmesh.types.BMEdge, mid_vert: bmesh.types.BMVert) -> Rot
         elif vert.index == vB.index:
             iBface2 = i
 
-    if iAface1 is None or iAface2 is None or iBface1 is None or iBface2 is None:
+    if None in {iAface1, iAface2, iBface1, iBface2}:
         return Rotation.NONE
 
     if (iBface1 + 1) % 4 != iAface1:
@@ -1198,9 +1203,6 @@ def compute_fitmaps():
             vert_normal = vert.normal.normalized()
             if plane_normal.dot(vert_normal) < 0:
                 plane_normal = -plane_normal
-            # plane_normal = (
-            #     vert_normal  # TODO: remove if you want to use the computed plane
-            # )
 
             face_neighbors = get_faces_neighbors_from_verts(
                 vert, neighbors_at_radius, radius
@@ -1299,7 +1301,7 @@ if __name__ == "__main__":
     INITIAL_MESH = bm.copy()
     compute_fitmaps()
 
-    bm = simplify_mesh(bm, 2000)
+    bm = simplify_mesh(bm, 0)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
