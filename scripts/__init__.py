@@ -33,7 +33,7 @@ class OBJECT_OT_adaptive_quad_mesh_simplification(bpy.types.Operator):
 
     simplification_bool: bpy.props.BoolProperty(name="Simplification ?", default=False)
 
-    simplification_verbose_bool: bpy.props.BoolProperty(name="Verbose ?", default=False)
+    simplification_verbose_bool: bpy.props.BoolProperty(name="Verbose ?", default=True)
 
     simplification_factor: bpy.props.IntProperty(
         name="Face limit",
