@@ -854,6 +854,7 @@ class MeshSimplifier:
         )
 
         # Mesh params
+        bm.normal_update()  # Ensure normals are up-to-date
         self.bm = bm
         self.initial_mesh = bm.copy()
         self.bvh = None
@@ -1300,6 +1301,7 @@ class MeshSimplifier:
         self.log(f"Total outdated faces: {total_outdated_faces}")
         self.log(f"Total non-quad faces: {total_non_quad_faces}")
 
+        self.initial_mesh.free()
         return self.bm
 
 
