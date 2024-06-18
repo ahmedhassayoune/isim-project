@@ -432,29 +432,14 @@ def debug_here(
 def interpolate_fitmap(
     bvh: bvhtree.BVHTree,
     initial_mesh: bmesh.types.BMesh,
-    face: bmesh.types.BMFace,
     point: Vector,
     fitmap_layer: str,
 ) -> float:
     """Interpolate the fitmap value of the given face at the given point."""
     # Fetch projected point and associated face on the source mesh M0 by casting 2 opposite rays
-    projected, _, face_idx, dist = bvh.ray_cast(point, face.normal.normalized())
-    projected_opp, _, face_idx_opp, dist_opp = bvh.ray_cast(
-        point, -face.normal.normalized()
-    )
-
-    # Handle case where no hit position is found
-    if not projected and not projected_opp:
-        raise Exception("Warning: No hit position or normal")
-
-    if dist is None:
-        dist = float("inf")
-    if dist_opp is None:
-        dist_opp = float("inf")
-    # Get the closest hit position to the mid-vertex
-    if dist_opp < dist:
-        projected = projected_opp
-        face_idx = face_idx_opp
+    projected, _, face_idx, _ = bvh.find_nearest(point)
+    if projected is None:
+        raise Exception("Warning: No closest position found")
 
     initial_mesh.faces.ensure_lookup_table()
     target_face = initial_mesh.faces[face_idx]
@@ -509,7 +494,6 @@ def compute_priority(
     interpolated_sfitmap = interpolate_fitmap(
         bvh=bvh,
         initial_mesh=initial_mesh,
-        face=face,
         point=center,
         fitmap_layer=sfitmap_layer,
     )
@@ -538,7 +522,8 @@ def push_updated_faces(heap, faces: list[bmesh.types.BMesh], out_index=None):
     for face in faces:
         if out_index and face.index == out_index:
             continue
-        heap.push(face)
+        if face.is_valid and len(face.verts) == 4:
+            heap.push(face)
 
 
 def compute_energy(edge: bmesh.types.BMEdge, new_edge: list[bmesh.types.BMVert] = None):
@@ -736,16 +721,20 @@ def get_unique_verts(faces: list[bmesh.types.BMFace]) -> list[bmesh.types.BMVert
     return verts
 
 
-def get_unique_faces(verts: list[bmesh.types.BMVert]) -> list[bmesh.types.BMFace]:
+def get_unique_faces(
+    verts: list[bmesh.types.BMVert], initial_faces: list[bmesh.types.BMFace] = None
+) -> list[bmesh.types.BMFace]:
     """Get a list of unique faces from the given list of vertices."""
-    faces = []
-    set_visited = set()
+    faces = [] if initial_faces is None else initial_faces
+    visited = set()
+    for iface in faces:
+        visited.add(iface.index)
 
     for vert in verts:
         for face in vert.link_faces:
-            if face.index not in set_visited:
+            if face.index not in visited:
+                visited.add(face.index)
                 faces.append(face)
-                set_visited.add(face.index)
     return faces
 
 
@@ -989,7 +978,6 @@ class MeshSimplifier:
             interpolated_mfitmap = interpolate_fitmap(
                 bvh=self.bvh,
                 initial_mesh=self.initial_mesh,
-                face=face,
                 point=center,
                 fitmap_layer=self.mfitmap_layer,
             )
@@ -1015,27 +1003,16 @@ class MeshSimplifier:
             diag_verts = [v2, v4]
             neighbor_vert = v1
 
-        # Cast 2 opposite rays from the mid-vertex to find the hit positions on source mesh M0
-        hit_pos, _, _, dist = self.bvh.ray_cast(mid_position, face.normal)
-        hit_pos_opp, _, _, dist_opp = self.bvh.ray_cast(mid_position, -face.normal)
-
-        # Handle case where no hit position is found
-        if not hit_pos and not hit_pos_opp:
-            raise Exception("Warning: No hit position or normal")
-
-        if dist is None:
-            dist = float("inf")
-        if dist_opp is None:
-            dist_opp = float("inf")
-        # Get the closest hit position to the mid-vertex
-        if dist_opp < dist:
-            hit_pos = hit_pos_opp
+        # Get projection of mid-vertex on source mesh M0
+        projection, _, _, _ = self.bvh.find_nearest(mid_position)
+        if projection is None:
+            raise Exception("Warning: No projection found")
 
         # Project mid-vertex on the hit position
-        bmesh.ops.pointmerge(self.bm, verts=diag_verts, merge_co=hit_pos)
+        bmesh.ops.pointmerge(self.bm, verts=diag_verts, merge_co=projection)
         self.bm.faces.ensure_lookup_table()
 
-        merged_vert = get_neighbor_vert_from_pos(neighbor_vert, hit_pos)
+        merged_vert = get_neighbor_vert_from_pos(vert=neighbor_vert, pos=projection)
         return merged_vert
 
     def clean_local_zone(self, verts: list[bmesh.types.BMVert]):
@@ -1108,8 +1085,8 @@ class MeshSimplifier:
             return modified_faces
 
         edges = list(mid_vert.link_edges)
-        for i, edge in enumerate(edges):
-            if len(edge.link_faces) != 2:
+        for edge in edges:
+            if not edge.is_valid or len(edge.link_faces) != 2:
                 continue
 
             rotation = best_rotation(edge, mid_vert)
@@ -1149,18 +1126,21 @@ class MeshSimplifier:
 
     def smooth_mesh(self, verts: list[bmesh.types.BMVert], relax_iter: int = 10):
         """Smooth the local zone of the given vertices with `relax_iter` iterations."""
-        euler_step = 0.05
+        euler_step = 0.01
         convergence_threshold = 0.001
 
-        for i in range(relax_iter):
+        for _ in range(relax_iter):
             average_length = np.zeros(len(verts), dtype=float)
             average_forces = np.array([Vector((0.0, 0.0, 0.0))] * len(verts))
 
             for i, vert in enumerate(verts):
                 # Compute the average length of the direct edges
-                average_length[i] = np.mean(
-                    [edge.calc_length() for edge in vert.link_edges]
+                diagonals = get_diagonal_vertices(vert)
+                edges_len = [edge.calc_length() for edge in vert.link_edges]
+                edges_len.extend(
+                    [distance_vec(vert.co, diag.co) / np.sqrt(2) for diag in diagonals]
                 )
+                average_length[i] = np.mean(edges_len)
 
                 # Compute the force vector for each direct edge
                 for edge in vert.link_edges:
@@ -1170,22 +1150,21 @@ class MeshSimplifier:
                         average_length[i] - force_vec.length
                     )
                 # Compute the force vector for each diagonal edge
-                diagonals = get_diagonal_vertices(vert)
                 for diag in diagonals:
                     force_vec = vert.co - diag.co
                     average_forces[i] += force_vec.normalized() * (
-                        np.sqrt(2) * average_length[i] - force_vec.length
+                        average_length[i] - force_vec.length / np.sqrt(2)
                     )
 
             changed = False
             # Update the position of each vertex based on the average forces
-            for i, vert in enumerate(verts):
-                new_vert_pos = average_forces[i] * euler_step + vert.co
+            for j, vert in enumerate(verts):
+                new_vert_pos = average_forces[j] * euler_step + vert.co
                 closest_pos, _, _, dist = self.bvh.find_nearest(new_vert_pos)
                 if closest_pos is None:
                     self.log(logging.WARNING, "Warning: No closest position found")
                     continue
-                changed |= dist > (average_length[i] * convergence_threshold)
+                changed |= dist > (average_length[j] * convergence_threshold)
                 vert.co = closest_pos
 
             if not changed:
@@ -1276,8 +1255,13 @@ class MeshSimplifier:
             smooth_verts = get_unique_verts(all_modified_faces_valid)
 
             if smooth_verts:
-                self.smooth_mesh(verts=smooth_verts, relax_iter=5)
-                push_updated_faces(heap=self.heap, faces=all_modified_faces_valid)
+                self.smooth_mesh(verts=smooth_verts, relax_iter=10)
+                push_updated_faces(
+                    heap=self.heap,
+                    faces=get_unique_faces(
+                        verts=smooth_verts, initial_faces=all_modified_faces_valid
+                    ),
+                )
 
             if mesh_iteration % 100 == 0:
                 self.log(f"\n--- Iteration {mesh_iteration} done ---")

@@ -61,6 +61,7 @@ class OBJECT_OT_adaptive_quad_mesh_simplification(bpy.types.Operator):
         if self.tri_to_quad_bool:
             bm = triToQuad(bm)
         if self.simplification_bool:
+            bm.normal_update()
             bm = simplification.MeshSimplifier(
                 bm, verbose=self.simplification_verbose_bool
             ).simplify_mesh(nb_faces=self.simplification_factor)
