@@ -281,7 +281,12 @@ class Rotation(Enum):
 class MyHeap(object):
     """Wrapper class for a heap with custom key function."""
 
-    def __init__(self, initial=None, key=lambda x: x):
+    def __init__(self, uid_layer, initial=None, key=lambda x: x):
+        # Heap attributes
+        self.heap_elem_occ = dict()
+        self.uid_layer = uid_layer
+
+        # Heap params
         self.key = key
         self.index = 0
         self._data = []
@@ -289,8 +294,8 @@ class MyHeap(object):
             for i, item in enumerate(initial):
                 elem_uuid = uuid4().bytes
                 heap_elem = (key(item), i, elem_uuid, item)
-                item[UID_LAYER] = elem_uuid
-                HEAP_ELEM_OCC[elem_uuid] = 1
+                item[self.uid_layer] = elem_uuid
+                self.heap_elem_occ[elem_uuid] = 1
                 self._data.append(heap_elem)
             self.index = len(self._data)
             heapq.heapify(self._data)
@@ -299,14 +304,14 @@ class MyHeap(object):
         """Push an item to the heap."""
         if len(item.verts) != 4:
             return
-        if item[UID_LAYER] == 0:  # New item
+        if item[self.uid_layer] == 0:  # New item
             elem_uuid = uuid4().bytes
-            item[UID_LAYER] = elem_uuid
+            item[self.uid_layer] = elem_uuid
             heap_elem = (self.key(item), self.index, elem_uuid, item)
-            HEAP_ELEM_OCC[elem_uuid] = 1
+            self.heap_elem_occ[elem_uuid] = 1
         else:
-            heap_elem = (self.key(item), self.index, item[UID_LAYER], item)
-            HEAP_ELEM_OCC[item[UID_LAYER]] += 1
+            heap_elem = (self.key(item), self.index, item[self.uid_layer], item)
+            self.heap_elem_occ[item[self.uid_layer]] += 1
 
         heapq.heappush(self._data, heap_elem)
         self.index += 1
@@ -315,7 +320,7 @@ class MyHeap(object):
         """Pop the item with the highest priority from the heap."""
         elem = heapq.heappop(self._data)
         elem_uuid = elem[2]
-        HEAP_ELEM_OCC[elem_uuid] -= 1
+        self.heap_elem_occ[elem_uuid] -= 1
         return elem
 
 
@@ -323,18 +328,6 @@ class MyHeap(object):
 def distance_vec(point1: Vector, point2: Vector) -> float:
     """Calculate distance between two points."""
     return (point2 - point1).length
-
-
-def compute_min_diagonal_length(face: bmesh.types.BMFace) -> float:
-    """Compute the minimum diagonal length of the given quad face."""
-    if len(face.verts) != 4:
-        if VERBOSE:
-            print("Warning: Face is not a quad")
-        return float("inf")
-    v1, v2, v3, v4 = face.verts
-    diag1_len = distance_vec(v1.co, v3.co)
-    diag2_len = distance_vec(v2.co, v4.co)
-    return min(diag1_len, diag2_len)
 
 
 def compute_barycentric_coordinates(
@@ -376,25 +369,6 @@ def compute_barycentric_coordinates(
     inside = (alpha >= 0) and (beta >= 0) and (alpha + beta <= 1)
 
     return inside, gamma, alpha, beta
-
-
-def compute_priority(face: bmesh.types.BMFace) -> float:
-    """Compute the priority of the given face."""
-    v1, v2, v3, v4 = face.verts
-    diag1_len = distance_vec(v1.co, v3.co)
-    diag2_len = distance_vec(v2.co, v4.co)
-
-    # Compute the center point of the shortest diagonal
-    if diag1_len < diag2_len:
-        diag_len = diag1_len
-        center = (v1.co + v3.co) / 2
-    else:
-        diag_len = diag2_len
-        center = (v2.co + v4.co) / 2
-
-    interpolated_sfitmap = interpolate_fitmap(face, center, SFITMAP_LAYER)
-
-    return diag_len * interpolated_sfitmap
 
 
 def fit_polynomial(neighbors: list, vert: bmesh.types.BMVert) -> tuple:
@@ -455,23 +429,76 @@ def debug_here(
 
 
 # -- Mesh Simplification Functions
-def build_bvh_tree():
-    """Build a BVH tree for the given mesh."""
-    global BVH
-    BVH = bvhtree.BVHTree.FromBMesh(INITIAL_MESH)
+def interpolate_fitmap(
+    bvh: bvhtree.BVHTree,
+    initial_mesh: bmesh.types.BMesh,
+    point: Vector,
+    fitmap_layer: str,
+) -> float:
+    """Interpolate the fitmap value of the given face at the given point."""
+    # Fetch projected point and associated face on the source mesh M0 by casting 2 opposite rays
+    projected, _, face_idx, _ = bvh.find_nearest(point)
+    if projected is None:
+        raise Exception("Warning: No closest position found")
+
+    initial_mesh.faces.ensure_lookup_table()
+    target_face = initial_mesh.faces[face_idx]
+
+    tri_ABC = [
+        target_face.verts[0],
+        target_face.verts[1],
+        target_face.verts[2],
+    ]
+    inside, *scalars = compute_barycentric_coordinates(projected, tri_ABC)
+    if inside:
+        return (
+            scalars[0] * tri_ABC[0][fitmap_layer]
+            + scalars[1] * tri_ABC[1][fitmap_layer]
+            + scalars[2] * tri_ABC[2][fitmap_layer]
+        )
+
+    tri_ACD = [
+        target_face.verts[0],
+        target_face.verts[2],
+        target_face.verts[3],
+    ]
+    _, *scalars = compute_barycentric_coordinates(projected, tri_ACD)
+    return (
+        scalars[0] * tri_ACD[0][fitmap_layer]
+        + scalars[1] * tri_ACD[1][fitmap_layer]
+        + scalars[2] * tri_ACD[2][fitmap_layer]
+    )
 
 
-def build_mesh_heap(mesh: bmesh.types.BMesh) -> list:
-    """Build a heap with the faces of the given mesh. Assign a unique id to each face."""
-    global UID_LAYER
-    UID_LAYER = mesh.faces.layers.string.new("uid")
+def compute_priority(
+    bvh: bvhtree.BVHTree,
+    initial_mesh: bmesh.types.BMesh,
+    face: bmesh.types.BMFace,
+    sfitmap_layer: int,
+) -> float:
+    """Compute the priority of the given face."""
+    if len(face.verts) != 4:
+        return float("inf")
+    v1, v2, v3, v4 = face.verts
+    diag1_len = distance_vec(v1.co, v3.co)
+    diag2_len = distance_vec(v2.co, v4.co)
 
-    global HEAP_ELEM_OCC
-    HEAP_ELEM_OCC = dict()
+    # Compute the center point of the shortest diagonal
+    if diag1_len < diag2_len:
+        diag_len = diag1_len
+        center = (v1.co + v3.co) / 2
+    else:
+        diag_len = diag2_len
+        center = (v2.co + v4.co) / 2
 
-    global HEAP
-    faces = list(mesh.faces)
-    HEAP = MyHeap(initial=faces, key=lambda face: compute_priority(face))
+    interpolated_sfitmap = interpolate_fitmap(
+        bvh=bvh,
+        initial_mesh=initial_mesh,
+        point=center,
+        fitmap_layer=sfitmap_layer,
+    )
+
+    return diag_len * interpolated_sfitmap
 
 
 def get_neighbor_vert_from_pos(
@@ -485,143 +512,18 @@ def get_neighbor_vert_from_pos(
             return other_vert
         if (dist := distance_vec(other_vert.co, pos)) < min_dist:
             min_dist, min_vert = dist, other_vert
-    print("Warning: No exact neighbor found")
+    logging.root.setLevel(logging.WARNING)
+    logging.log(logging.WARNING, "Warning: No exact neighbor found")
     return min_vert
 
 
-def remove_doublets(
-    bm: bmesh.types.BMesh,
-    verts: list[bmesh.types.BMVert],
-):
-    """Remove doublets in given verts and update the heap."""
-    clean_faces = []
-
-    q = Queue()
-    # Push all doublet vertices to the queue
-    for vert in verts:
-        if len(vert.link_edges) == 2:
-            q.put(vert)
-
-    while not q.empty():
-        vert = q.get()
-
-        # Fetch adjacent vertices
-        av1, av2 = (
-            vert.link_edges[0].other_vert(vert),
-            vert.link_edges[1].other_vert(vert),
-        )
-
-        # Remove doublet
-        region = bmesh.ops.dissolve_faces(bm, faces=vert.link_faces, use_verts=True)
-        faces = region["region"]
-
-        # Push adjacent vertices to the queue if they are doublets
-        if av1.is_valid and len(av1.link_edges) == 2:
-            q.put(av1)
-        if av2.is_valid and len(av2.link_edges) == 2:
-            q.put(av2)
-
-        if faces:
-            clean_faces.append(faces[0])
-
-    # Keep only valid clean faces
-    valid_clean_faces = []
-    for face in clean_faces:
-        if face.is_valid:
-            valid_clean_faces.append(face)
-            HEAP.push(face)
-
-    return valid_clean_faces
-
-
-def clean_local_zone(bm: bmesh.types.BMesh, verts: list[bmesh.types.BMVert]):
-    # Remove doublets recursively
-    clean_faces = remove_doublets(bm, verts)
-    if not clean_faces:
-        return clean_faces
-
-    # Remove potiential generated singlets or other degenerates
-    # e.g. edges w/o length, faces w/o area ...
-    for cface in clean_faces:
-        if cface.is_valid:
-            bmesh.ops.dissolve_degenerate(bm, edges=cface.edges)
-
-    # Make sure we keep only valid faces
-    valid_clean_faces = [f for f in clean_faces if f.is_valid]
-
-    return valid_clean_faces
-
-
-def push_updated_faces(faces: list[bmesh.types.BMesh], out_index=None):
+def push_updated_faces(heap, faces: list[bmesh.types.BMesh], out_index=None):
     """Push updated faces to the heap except the one with the given index."""
     for face in faces:
         if out_index and face.index == out_index:
             continue
-        HEAP.push(face)
-
-
-def allow_collapse(face: bmesh.types.BMFace) -> bool:
-    """Check if the given face is allowed to collapse based on M-Fitmap on surrounding faces"""
-    # Get surrounding faces
-    visited = set()
-    visited.add(face.index)
-    surrounding_faces = []
-    for vert in face.verts:
-        for f in vert.link_faces:
-            if f.index not in visited:
-                visited.add(f.index)
-                surrounding_faces.append(f)
-
-    for sface in surrounding_faces:
-        center = sface.calc_center_median()
-        radius = max([distance_vec(center, v.co) for v in sface.verts])
-
-        interpolated_mfitmap = interpolate_fitmap(face, center, MFITMAP_LAYER)
-
-        if radius >= interpolated_mfitmap:
-            return False
-    return True
-
-
-def collapse_diagonal(mesh: bmesh.types.BMesh, face: bmesh.types.BMFace):
-    """Collapse the shortest diagonal of the given quad face."""
-    v1, v2, v3, v4 = face.verts
-    diag1_len, diag2_len = (
-        distance_vec(v1.co, v3.co),
-        distance_vec(v2.co, v4.co),
-    )
-    # Apply diagonal collapse on mid-point of the shortest diagonal
-    if diag1_len < diag2_len:
-        mid_position = (v1.co + v3.co) / 2
-        diag_verts = [v1, v3]
-        neighbor_vert = v2
-    else:
-        mid_position = (v2.co + v4.co) / 2
-        diag_verts = [v2, v4]
-        neighbor_vert = v1
-
-    # Cast 2 opposite rays from the mid-vertex to find the hit positions on source mesh M0
-    hit_pos, _, _, dist = BVH.ray_cast(mid_position, face.normal)
-    hit_pos_opp, _, _, dist_opp = BVH.ray_cast(mid_position, -face.normal)
-
-    # Handle case where no hit position is found
-    if not hit_pos and not hit_pos_opp:
-        raise Exception("Warning: No hit position or normal")
-
-    if dist is None:
-        dist = float("inf")
-    if dist_opp is None:
-        dist_opp = float("inf")
-    # Get the closest hit position to the mid-vertex
-    if dist_opp < dist:
-        hit_pos = hit_pos_opp
-
-    # Project mid-vertex on the hit position
-    bmesh.ops.pointmerge(mesh, verts=diag_verts, merge_co=hit_pos)
-    mesh.faces.ensure_lookup_table()
-
-    merged_vert = get_neighbor_vert_from_pos(neighbor_vert, hit_pos)
-    return merged_vert
+        if face.is_valid and len(face.verts) == 4:
+            heap.push(face)
 
 
 def compute_energy(edge: bmesh.types.BMEdge, new_edge: list[bmesh.types.BMVert] = None):
@@ -806,49 +708,6 @@ def best_rotation(edge: bmesh.types.BMEdge, mid_vert: bmesh.types.BMVert) -> Rot
         return Rotation.CCW
 
 
-def rotate_edges(bm: bmesh.types.BMesh, mid_vert: bmesh.types.BMVert):
-    """Rotate the edges of the given list to minimize the energy."""
-    modified_faces = []
-    if not mid_vert.is_valid:
-        return modified_faces
-
-    edges = list(mid_vert.link_edges)
-    for i, edge in enumerate(edges):
-        if len(edge.link_faces) != 2:
-            continue
-
-        rotation = best_rotation(edge, mid_vert)
-
-        if rotation == Rotation.NONE:
-            continue
-
-        # Record edge vertices
-        v1, v2 = edge.verts
-
-        # Apply rotation
-        if rotation == Rotation.CW:
-            rotated_edge = bmesh.ops.rotate_edges(bm, edges=[edge], use_ccw=False)
-            rotated_edge = rotated_edge["edges"]
-        else:
-            rotated_edge = bmesh.ops.rotate_edges(bm, edges=[edge], use_ccw=True)
-            rotated_edge = rotated_edge["edges"]
-
-        # Check if the rotation is valid
-        if not rotated_edge:
-            continue
-        rotated_edge = rotated_edge[0]
-
-        # Update faces and clean local zone
-        for f in rotated_edge.link_faces:
-            HEAP.push(f)
-            modified_faces.append(f)
-        clean_faces = clean_local_zone(bm, [v1, v2])
-        modified_faces.extend(clean_faces)
-
-    valid_modified_faces = [f for f in modified_faces if f.is_valid]
-    return valid_modified_faces
-
-
 def get_unique_verts(faces: list[bmesh.types.BMFace]) -> list[bmesh.types.BMVert]:
     """Get a list of unique vertices from the given list of faces."""
     verts = []
@@ -862,16 +721,20 @@ def get_unique_verts(faces: list[bmesh.types.BMFace]) -> list[bmesh.types.BMVert
     return verts
 
 
-def get_unique_faces(verts: list[bmesh.types.BMVert]) -> list[bmesh.types.BMFace]:
+def get_unique_faces(
+    verts: list[bmesh.types.BMVert], initial_faces: list[bmesh.types.BMFace] = None
+) -> list[bmesh.types.BMFace]:
     """Get a list of unique faces from the given list of vertices."""
-    faces = []
-    set_visited = set()
+    faces = [] if initial_faces is None else initial_faces
+    visited = set()
+    for iface in faces:
+        visited.add(iface.index)
 
     for vert in verts:
         for face in vert.link_faces:
-            if face.index not in set_visited:
+            if face.index not in visited:
+                visited.add(face.index)
                 faces.append(face)
-                set_visited.add(face.index)
     return faces
 
 
@@ -887,56 +750,6 @@ def get_diagonal_vertices(vert: bmesh.types.BMVert) -> list[bmesh.types.BMVert]:
         diag_vert = face.verts[(vert_index + 2) % 4]
         diagonals.append(diag_vert)
     return diagonals
-
-
-def smooth_mesh(
-    mesh: bmesh.types.BMesh, verts: list[bmesh.types.BMVert], relax_iter: int = 10
-):
-    """Smooth the local zone of the given vertices with `relax_iter` iterations."""
-    euler_step = 0.05
-    convergence_threshold = 0.001
-
-    for i in range(relax_iter):
-        average_length = np.zeros(len(verts), dtype=float)
-        average_forces = np.array([Vector((0.0, 0.0, 0.0))] * len(verts))
-
-        for i, vert in enumerate(verts):
-            # Compute the average length of the direct edges
-            average_length[i] = np.mean(
-                [edge.calc_length() for edge in vert.link_edges]
-            )
-
-            # Compute the force vector for each direct edge
-            for edge in vert.link_edges:
-                other = edge.other_vert(vert)
-                force_vec = vert.co - other.co
-                average_forces[i] += force_vec.normalized() * (
-                    average_length[i] - force_vec.length
-                )
-            # Compute the force vector for each diagonal edge
-            diagonals = get_diagonal_vertices(vert)
-            for diag in diagonals:
-                force_vec = vert.co - diag.co
-                average_forces[i] += force_vec.normalized() * (
-                    np.sqrt(2) * average_length[i] - force_vec.length
-                )
-
-        changed = False
-        # Update the position of each vertex based on the average forces
-        for i, vert in enumerate(verts):
-            new_vert_pos = average_forces[i] * euler_step + vert.co
-            closest_pos, _, _, dist = BVH.find_nearest(new_vert_pos)
-            if closest_pos is None:
-                if VERBOSE:
-                    print("Warning: No closest position found")
-                continue
-            changed |= dist > (average_length[i] * convergence_threshold)
-            vert.co = closest_pos
-
-        if not changed:
-            break
-    # Update the normals of the mesh
-    mesh.normal_update()
 
 
 def get_neighbors_from_radius(vert: bmesh.types.BMVert, radius: float) -> list:
@@ -984,72 +797,7 @@ def get_faces_neighbors_from_verts(
     return neighbor_faces
 
 
-# -- Fitmap Computation and Visualization Functions
-def interpolate_fitmap(face: bmesh.types.BMFace, point: Vector, fitmap_layer: str):
-    """Interpolate the fitmap value of the given face at the given point."""
-    # Fetch projected point and associated face on the source mesh M0 by casting 2 opposite rays
-    projected, _, face_idx, dist = BVH.ray_cast(point, face.normal.normalized())
-    projected_opp, _, face_idx_opp, dist_opp = BVH.ray_cast(
-        point, -face.normal.normalized()
-    )
-
-    # Handle case where no hit position is found
-    if not projected and not projected_opp:
-        raise Exception("Warning: No hit position or normal")
-
-    if dist is None:
-        dist = float("inf")
-    if dist_opp is None:
-        dist_opp = float("inf")
-    # Get the closest hit position to the mid-vertex
-    if dist_opp < dist:
-        projected = projected_opp
-        face_idx = face_idx_opp
-
-    INITIAL_MESH.faces.ensure_lookup_table()
-    target_face = INITIAL_MESH.faces[face_idx]
-    if VERBOSE and len(target_face.verts) != 4:
-        raise Exception("Warning: Face is not a quad")
-
-    tri_ABC = [
-        target_face.verts[0],
-        target_face.verts[1],
-        target_face.verts[2],
-    ]
-    tri_ACD = [
-        target_face.verts[0],
-        target_face.verts[2],
-        target_face.verts[3],
-    ]
-    tri_ABD = [
-        target_face.verts[0],
-        target_face.verts[1],
-        target_face.verts[3],
-    ]
-    tri_BCD = [
-        target_face.verts[1],
-        target_face.verts[2],
-        target_face.verts[3],
-    ]
-    triangles = [tri_ABC, tri_ACD, tri_ABD, tri_BCD]
-
-    for triangle in triangles:
-        inside, *scalars = compute_barycentric_coordinates(projected, triangle)
-        if inside:
-            return (
-                scalars[0] * triangle[0][fitmap_layer]
-                + scalars[1] * triangle[1][fitmap_layer]
-                + scalars[2] * triangle[2][fitmap_layer]
-            )
-
-    # Return last triangle in any case <-- Not reached normalement
-    return (
-        scalars[0] * triangles[-1][0][fitmap_layer]
-        + scalars[1] * triangles[-1][1][fitmap_layer]
-        + scalars[2] * triangles[-1][2][fitmap_layer]
-    )
-
-
+# -- Fitmap Computation Functions
 def compute_sfitmap(radii: np.ndarray, radii_errors: list) -> float:
     """Compute the Scale fitmap from the given radii and errors."""
     # fit ax^2
@@ -1084,222 +832,464 @@ def compute_mfitmap(
     return False
 
 
-def compute_fitmaps():
-    """Compute the Scale and Maximal radius fitmaps for the given mesh."""
-    global SFITMAP_LAYER, MFITMAP_LAYER
-    SFITMAP_LAYER = INITIAL_MESH.verts.layers.float.new("sfitmap")
-    MFITMAP_LAYER = INITIAL_MESH.verts.layers.float.new("mfitmap")
-
-    avg_edges_length = np.mean([edge.calc_length() for edge in INITIAL_MESH.edges])
-    max_radii = 5
-
-    r0 = avg_edges_length
-    radii = np.array([r0 * (1 + i) for i in range(max_radii)])
-
-    len_verts = len(INITIAL_MESH.verts)
-    for i, vert in enumerate(INITIAL_MESH.verts):
-        radii_errors = []
-        mfitmap_radius = None
-
-        max_neighbors = get_neighbors_from_radius(vert, radii[-1])
-        for j, radius in enumerate(radii):
-            neighbors_at_radius = [
-                n for n in max_neighbors if distance_vec(vert.co, n.co) < radius
-            ]
-
-            # -- Compute S-Fitmap --
-            coefs, radius_error = fit_polynomial(neighbors_at_radius, vert)
-            radii_errors.append(radius_error)
-
-            # -- Compute M-Fitmap --
-            if coefs is None or mfitmap_radius is not None:
-                continue
-            a1, a2, _ = coefs
-            plane_normal = Vector((a1, a2, -1)).normalized()
-
-            # Ensure the normal points outward
-            vert_normal = vert.normal.normalized()
-            if plane_normal.dot(vert_normal) < 0:
-                plane_normal = -plane_normal
-            # plane_normal = vert_normal
-
-            face_neighbors = get_faces_neighbors_from_verts(
-                vert, neighbors_at_radius, radius
-            )
-            finished = compute_mfitmap(plane_normal, face_neighbors)
-            if finished:
-                mfitmap_radius = radii[j - 1] if j > 0 else 0
-
-        vert[SFITMAP_LAYER] = compute_sfitmap(radii, radii_errors)
-        vert[MFITMAP_LAYER] = (
-            mfitmap_radius if mfitmap_radius is not None else radii[-1]
+class MeshSimplifier:
+    def __init__(self, bm: bmesh.types.BMesh, verbose: bool = False):
+        # Logging params
+        self.verbose = verbose
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s [%(levelname)s]: %(message)s",
+            force=True,
         )
 
-        if i % 100 == 0:
-            print(f"Computed fitmaps for {i}/{len_verts}")
+        # Mesh params
+        bm.normal_update()  # Ensure normals are up-to-date
+        self.bm = bm
+        self.initial_mesh = bm.copy()
+        self.bvh = None
+        self.heap = None
+        self.sfitmap_layer = None
+        self.mfitmap_layer = None
 
+    def log(self, message: str, level: int = logging.INFO):
+        """Log a message with the given level."""
+        if self.verbose:
+            logging.root.setLevel(level)
+            logging.log(level, message)
 
-def visualize_fitmap(sfitmap: bool = True):
-    """Color the vertices of the given mesh based on the given fitmap layer."""
-    # Get the active mesh
-    mesh = bpy.context.object.data
+    def compute_fitmaps(self):
+        self.sfitmap_layer = self.initial_mesh.verts.layers.float.new("sfitmap")
+        self.mfitmap_layer = self.initial_mesh.verts.layers.float.new("mfitmap")
 
-    bpy.ops.object.mode_set(mode="EDIT")
+        avg_edges_length = np.mean(
+            [edge.calc_length() for edge in self.initial_mesh.edges]
+        )
+        max_radii = 5
 
-    # Get a BMesh representation
-    bm = bmesh.from_edit_mesh(mesh)
-    global INITIAL_MESH
-    INITIAL_MESH = bm
+        r0 = avg_edges_length
+        radii = np.array([r0 * (1 + i) for i in range(max_radii)])
 
-    compute_fitmaps()
-    fitmap_layer = SFITMAP_LAYER if sfitmap else MFITMAP_LAYER
+        len_verts = len(self.initial_mesh.verts)
+        for i, vert in enumerate(self.initial_mesh.verts):
+            radii_errors = []
+            mfitmap_radius = None
 
-    # Get the min and max values of the fitmap
-    min_val = min([v[fitmap_layer] for v in bm.verts])
-    max_val = max([v[fitmap_layer] for v in bm.verts])
+            max_neighbors = get_neighbors_from_radius(vert, radii[-1])
+            for j, radius in enumerate(radii):
+                neighbors_at_radius = [
+                    n for n in max_neighbors if distance_vec(vert.co, n.co) < radius
+                ]
 
-    point_color_attribute = mesh.color_attributes.get(
-        "FitmapColors"
-    ) or mesh.color_attributes.new(
-        name="FitmapColors", type="BYTE_COLOR", domain="POINT"
-    )
-    point_color_layer = bm.verts.layers.color[point_color_attribute.name]
-    # Compute the normalized fitmap values
-    for vert in bm.verts:
-        normalized_val = (vert[fitmap_layer] - min_val) / (max_val - min_val)
-        color = turbo_colormap[int(normalized_val * 255)]
-        vert[point_color_layer] = (
-            color[0],
-            color[1],
-            color[2],
-            1,
-        )  # Set Point Colors
-    bmesh.update_edit_mesh(mesh)
-    bpy.ops.object.mode_set(mode="OBJECT")
+                # -- Compute S-Fitmap --
+                coefs, radius_error = fit_polynomial(neighbors_at_radius, vert)
+                radii_errors.append(radius_error)
 
+                # -- Compute M-Fitmap --
+                if coefs is None or mfitmap_radius is not None:
+                    continue
+                a1, a2, _ = coefs
+                plane_normal = Vector((a1, a2, -1)).normalized()
 
-def simplify_mesh(mesh: bmesh.types.BMesh, nb_faces: int) -> bmesh.types.BMesh:
-    """
-    Apply quad mesh simplification to reduce the number of faces in the given BMesh object.
+                # Ensure the normal points outward
+                vert_normal = vert.normal.normalized()
+                if plane_normal.dot(vert_normal) < 0:
+                    plane_normal = -plane_normal
+                # plane_normal = vert_normal
 
-    This function simplifies the input quad mesh by reducing the number of faces while attempting
-    to preserve the overall shape and structure of the mesh.
-    To achieve simplification it applies the following local operations :
-        - coarsening: diagonal collapse
-        - optimizing: edge rotation
-        - cleaning: Doublet/Singlet removal
-        - smoothing: Tangent space smoothing
+                face_neighbors = get_faces_neighbors_from_verts(
+                    vert, neighbors_at_radius, radius
+                )
+                finished = compute_mfitmap(plane_normal, face_neighbors)
+                if finished:
+                    mfitmap_radius = radii[j - 1] if j > 0 else 0
 
-    Parameters:
-    - mesh (bmesh.types.BMesh): The input quad BMesh object representing the mesh to be simplified.
-    - nb_faces (int): The target number of faces for the simplified mesh. The function will
-      attempt to reduce the number of faces in the input quad mesh to approximately this number.
-
-    Returns:
-    - bmesh.types.BMesh: The simplified quad BMesh object with the reduced number of faces.
-
-    Note:
-    This function modifies the input mesh in-place and returns the same object.
-    """
-
-    # Initialize BVH tree of input mesh for spatial queries
-    build_bvh_tree()
-
-    # Initialize the heap with the faces of the input mesh
-    build_mesh_heap(mesh)
-
-    initial_mesh_faces = len(mesh.faces)
-    global MESH_ITERATION
-    MESH_ITERATION = 0
-
-    total_invalid_faces = 0
-    total_outdated_faces = 0
-    total_non_quad_faces = 0
-
-    # Repeat simplification until the desired number of faces is reached
-    while len(HEAP._data) > 0 and len(mesh.faces) > nb_faces:
-        iteration_faces = len(mesh.faces)
-
-        priority, _, uid, face = HEAP.pop()
-
-        if not face.is_valid:
-            total_invalid_faces += 1
-            continue
-
-        occ = HEAP_ELEM_OCC[uid]
-        if occ is None:  # <-- Should not happen
-            debug_here(mesh, [face])
-
-        if priority != compute_priority(face):
-            total_outdated_faces += 1
-            continue
-
-        if len(face.verts) != 4:
-            total_non_quad_faces += 1
-            continue
-
-        if not allow_collapse(face):
-            continue
-
-        # -- Coarsening: Diagonal collapse --
-        mid_vert = collapse_diagonal(mesh, face)
-        mid_vert_faces = list(mid_vert.link_faces)
-        push_updated_faces(mid_vert_faces)
-
-        # --> Apply related cleaning operations
-        neighbor_verts = [edge.other_vert(mid_vert) for edge in mid_vert.link_edges]
-        clean_faces = clean_local_zone(mesh, [mid_vert] + neighbor_verts)
-
-        # -- Optimizing: Edge rotation --
-        modified_faces = rotate_edges(mesh, mid_vert)
-
-        # -- Smoothing: Tangent space smoothing --
-        all_modified_faces = mid_vert_faces + clean_faces + modified_faces
-        all_modified_faces_valid = [f for f in all_modified_faces if f.is_valid]
-        smooth_verts = get_unique_verts(all_modified_faces_valid)
-
-        if smooth_verts:
-            smooth_mesh(mesh, smooth_verts, relax_iter=5)
-            push_updated_faces(all_modified_faces_valid)
-
-        if VERBOSE or MESH_ITERATION % 100 == 0:
-            logging.info(f"-- Iteration {MESH_ITERATION} done --")
-            logging.info(f"-> Total faces = {len(mesh.faces)}")
-            logging.info(
-                f"-> Total removed faces = {initial_mesh_faces - len(mesh.faces)}"
+            vert[self.sfitmap_layer] = compute_sfitmap(radii, radii_errors)
+            vert[self.mfitmap_layer] = (
+                mfitmap_radius if mfitmap_radius is not None else radii[-1]
             )
-            logging.info(
-                f"-> Total removed faces (in iter) = {iteration_faces - len(mesh.faces)}"
+
+            if i % 100 == 0:
+                self.log(f"Computed fitmaps for {i}/{len_verts}")
+
+    def visualize_fitmap(self, sfitmap: bool = True):
+        """Color the vertices of the given mesh based on the given fitmap layer."""
+        bpy.ops.object.mode_set(mode="EDIT")
+
+        self.initial_mesh = self.bm
+        self.compute_fitmaps()
+
+        fitmap_layer = self.sfitmap_layer if sfitmap else self.mfitmap_layer
+        # Get the min and max values of the fitmap
+        min_val = min([v[fitmap_layer] for v in self.bm.verts])
+        max_val = max([v[fitmap_layer] for v in self.bm.verts])
+
+        point_color_attribute = self.bm.color_attributes.get(
+            "FitmapColors"
+        ) or self.bm.color_attributes.new(
+            name="FitmapColors", type="BYTE_COLOR", domain="POINT"
+        )
+        point_color_layer = self.bm.verts.layers.color[point_color_attribute.name]
+        # Compute the normalized fitmap values
+        for vert in self.bm.verts:
+            normalized_val = (vert[fitmap_layer] - min_val) / (max_val - min_val)
+            color = turbo_colormap[int(normalized_val * 255)]
+            vert[point_color_layer] = (
+                color[0],
+                color[1],
+                color[2],
+                1,
+            )  # Set Point Colors
+        bpy.ops.object.mode_set(mode="OBJECT")
+
+        return self.bm
+
+    def build_bvh_tree(self):
+        self.bvh = bvhtree.BVHTree.FromBMesh(self.bm)
+
+    def build_mesh_heap(self):
+        uid_layer = self.bm.faces.layers.string.new("uid")
+        self.heap = MyHeap(
+            uid_layer=uid_layer,
+            initial=list(self.bm.faces),
+            key=lambda face: compute_priority(
+                bvh=self.bvh,
+                initial_mesh=self.initial_mesh,
+                face=face,
+                sfitmap_layer=self.sfitmap_layer,
+            ),
+        )
+
+    def allow_collapse(self, face: bmesh.types.BMFace) -> bool:
+        """Check if the given face is allowed to collapse based on M-Fitmap on surrounding faces"""
+        # Get surrounding faces
+        visited = set()
+        visited.add(face.index)
+        surrounding_faces = []
+        for vert in face.verts:
+            for f in vert.link_faces:
+                if f.index not in visited:
+                    visited.add(f.index)
+                    surrounding_faces.append(f)
+
+        for sface in surrounding_faces:
+            center = sface.calc_center_median()
+            radius = max([distance_vec(center, v.co) for v in sface.verts])
+
+            interpolated_mfitmap = interpolate_fitmap(
+                bvh=self.bvh,
+                initial_mesh=self.initial_mesh,
+                point=center,
+                fitmap_layer=self.mfitmap_layer,
             )
-            logging.info(f"-> Heap size = {len(HEAP._data)}")
 
-        MESH_ITERATION += 1
+            if radius >= interpolated_mfitmap:
+                return False
+        return True
 
-    logging.info("\n--- # Simplification DONE # ---")
-    logging.info(f"Final number of faces: {len(mesh.faces)}")
-    logging.info(f"Heap size: {len(HEAP._data)}")
-    logging.info(f"Total iterations: {MESH_ITERATION}")
-    logging.info("\n--- # Stats # ---")
-    logging.info(f"Total removed faces: {initial_mesh_faces - len(mesh.faces)}")
-    logging.info(f"Total invalid faces: {total_invalid_faces}")
-    logging.info(f"Total outdated faces: {total_outdated_faces}")
-    logging.info(f"Total non-quad faces: {total_non_quad_faces}")
+    def collapse_diagonal(self, face: bmesh.types.BMFace):
+        """Collapse the shortest diagonal of the given quad face."""
+        v1, v2, v3, v4 = face.verts
+        diag1_len, diag2_len = (
+            distance_vec(v1.co, v3.co),
+            distance_vec(v2.co, v4.co),
+        )
+        # Apply diagonal collapse on mid-point of the shortest diagonal
+        if diag1_len < diag2_len:
+            mid_position = (v1.co + v3.co) / 2
+            diag_verts = [v1, v3]
+            neighbor_vert = v2
+        else:
+            mid_position = (v2.co + v4.co) / 2
+            diag_verts = [v2, v4]
+            neighbor_vert = v1
 
-    return mesh
+        # Get projection of mid-vertex on source mesh M0
+        projection, _, _, _ = self.bvh.find_nearest(mid_position)
+        if projection is None:
+            raise Exception("Warning: No projection found")
+
+        # Project mid-vertex on the hit position
+        bmesh.ops.pointmerge(self.bm, verts=diag_verts, merge_co=projection)
+        self.bm.faces.ensure_lookup_table()
+
+        merged_vert = get_neighbor_vert_from_pos(vert=neighbor_vert, pos=projection)
+        return merged_vert
+
+    def clean_local_zone(self, verts: list[bmesh.types.BMVert]):
+        # Remove doublets recursively
+        clean_faces = self.remove_doublets(verts)
+        if not clean_faces:
+            return clean_faces
+
+        # Remove potiential generated singlets or other degenerates
+        # e.g. edges w/o length, faces w/o area ...
+        for cface in clean_faces:
+            if cface.is_valid:
+                bmesh.ops.dissolve_degenerate(self.bm, edges=cface.edges)
+
+        # Make sure we keep only valid faces
+        valid_clean_faces = [f for f in clean_faces if f.is_valid]
+
+        return valid_clean_faces
+
+    def remove_doublets(
+        self,
+        verts: list[bmesh.types.BMVert],
+    ):
+        """Remove doublets in given verts and update the heap."""
+        clean_faces = []
+
+        q = Queue()
+        # Push all doublet vertices to the queue
+        for vert in verts:
+            if len(vert.link_edges) == 2:
+                q.put(vert)
+
+        while not q.empty():
+            vert = q.get()
+
+            # Fetch adjacent vertices
+            av1, av2 = (
+                vert.link_edges[0].other_vert(vert),
+                vert.link_edges[1].other_vert(vert),
+            )
+
+            # Remove doublet
+            region = bmesh.ops.dissolve_faces(
+                self.bm, faces=vert.link_faces, use_verts=True
+            )
+            faces = region["region"]
+
+            # Push adjacent vertices to the queue if they are doublets
+            if av1.is_valid and len(av1.link_edges) == 2:
+                q.put(av1)
+            if av2.is_valid and len(av2.link_edges) == 2:
+                q.put(av2)
+
+            if faces:
+                clean_faces.append(faces[0])
+
+        # Keep only valid clean faces
+        valid_clean_faces = []
+        for face in clean_faces:
+            if face.is_valid:
+                valid_clean_faces.append(face)
+                self.heap.push(face)
+
+        return valid_clean_faces
+
+    def rotate_edges(self, mid_vert: bmesh.types.BMVert):
+        """Rotate the edges of the given list to minimize the energy."""
+        modified_faces = []
+        if not mid_vert.is_valid:
+            return modified_faces
+
+        edges = list(mid_vert.link_edges)
+        for edge in edges:
+            if not edge.is_valid or len(edge.link_faces) != 2:
+                continue
+
+            rotation = best_rotation(edge, mid_vert)
+
+            if rotation == Rotation.NONE:
+                continue
+
+            # Record edge vertices
+            v1, v2 = edge.verts
+
+            # Apply rotation
+            if rotation == Rotation.CW:
+                rotated_edge = bmesh.ops.rotate_edges(
+                    self.bm, edges=[edge], use_ccw=False
+                )
+                rotated_edge = rotated_edge["edges"]
+            else:
+                rotated_edge = bmesh.ops.rotate_edges(
+                    self.bm, edges=[edge], use_ccw=True
+                )
+                rotated_edge = rotated_edge["edges"]
+
+            # Check if the rotation is valid
+            if not rotated_edge:
+                continue
+            rotated_edge = rotated_edge[0]
+
+            # Update faces and clean local zone
+            for f in rotated_edge.link_faces:
+                self.heap.push(f)
+                modified_faces.append(f)
+            clean_faces = self.clean_local_zone([v1, v2])
+            modified_faces.extend(clean_faces)
+
+        valid_modified_faces = [f for f in modified_faces if f.is_valid]
+        return valid_modified_faces
+
+    def smooth_mesh(self, verts: list[bmesh.types.BMVert], relax_iter: int = 10):
+        """Smooth the local zone of the given vertices with `relax_iter` iterations."""
+        euler_step = 0.01
+        convergence_threshold = 0.001
+
+        for _ in range(relax_iter):
+            average_length = np.zeros(len(verts), dtype=float)
+            average_forces = np.array([Vector((0.0, 0.0, 0.0))] * len(verts))
+
+            for i, vert in enumerate(verts):
+                # Compute the average length of the direct edges
+                diagonals = get_diagonal_vertices(vert)
+                edges_len = [edge.calc_length() for edge in vert.link_edges]
+                edges_len.extend(
+                    [distance_vec(vert.co, diag.co) / np.sqrt(2) for diag in diagonals]
+                )
+                average_length[i] = np.mean(edges_len)
+
+                # Compute the force vector for each direct edge
+                for edge in vert.link_edges:
+                    other = edge.other_vert(vert)
+                    force_vec = vert.co - other.co
+                    average_forces[i] += force_vec.normalized() * (
+                        average_length[i] - force_vec.length
+                    )
+                # Compute the force vector for each diagonal edge
+                for diag in diagonals:
+                    force_vec = vert.co - diag.co
+                    average_forces[i] += force_vec.normalized() * (
+                        average_length[i] - force_vec.length / np.sqrt(2)
+                    )
+
+            changed = False
+            # Update the position of each vertex based on the average forces
+            for j, vert in enumerate(verts):
+                new_vert_pos = average_forces[j] * euler_step + vert.co
+                closest_pos, _, _, dist = self.bvh.find_nearest(new_vert_pos)
+                if closest_pos is None:
+                    self.log(logging.WARNING, "Warning: No closest position found")
+                    continue
+                changed |= dist > (average_length[j] * convergence_threshold)
+                vert.co = closest_pos
+
+            if not changed:
+                break
+
+        # Update the normals of the mesh
+        self.bm.normal_update()
+
+    def simplify_mesh(self, nb_faces: int) -> bmesh.types.BMesh:
+        """
+        Apply quad mesh simplification to reduce the number of faces in the given BMesh object.
+
+        This function simplifies the input quad mesh by reducing the number of faces while attempting
+        to preserve the overall shape and structure of the mesh.
+        To achieve simplification it applies the following local operations :
+            - coarsening: diagonal collapse
+            - optimizing: edge rotation
+            - cleaning: Doublet/Singlet removal
+            - smoothing: Tangent space smoothing
+
+        Parameters:
+        - mesh (bmesh.types.BMesh): The input quad BMesh object representing the mesh to be simplified.
+        - nb_faces (int): The target number of faces for the simplified mesh. The function will
+        attempt to reduce the number of faces in the input quad mesh to approximately this number.
+
+        Returns:
+        - bmesh.types.BMesh: The simplified quad BMesh object with the reduced number of faces.
+
+        Note:
+        This function modifies the input mesh in-place and returns the same object.
+        """
+        # Preprocessing - Compute the Scale and Maximal radius fitmaps
+        self.compute_fitmaps()
+
+        # Initialize BVH tree of input mesh for spatial queries
+        self.build_bvh_tree()
+
+        # Initialize the heap with the faces of the input mesh
+        self.build_mesh_heap()
+
+        initial_mesh_faces = len(self.bm.faces)
+        mesh_iteration = 0
+        total_invalid_faces = 0
+        total_outdated_faces = 0
+        total_non_quad_faces = 0
+
+        # Repeat simplification until the desired number of faces is reached
+        while len(self.heap._data) > 0 and len(self.bm.faces) > nb_faces:
+            iteration_faces = len(self.bm.faces)
+
+            priority, _, _, face = self.heap.pop()
+
+            if not face.is_valid:
+                total_invalid_faces += 1
+                continue
+
+            if priority != compute_priority(
+                bvh=self.bvh,
+                initial_mesh=self.initial_mesh,
+                face=face,
+                sfitmap_layer=self.sfitmap_layer,
+            ):
+                total_outdated_faces += 1
+                continue
+
+            if len(face.verts) != 4:
+                total_non_quad_faces += 1
+                continue
+
+            if not self.allow_collapse(face):
+                continue
+
+            # -- Coarsening: Diagonal collapse --
+            mid_vert = self.collapse_diagonal(face)
+            mid_vert_faces = list(mid_vert.link_faces)
+            push_updated_faces(heap=self.heap, faces=mid_vert_faces)
+
+            # --> Apply related cleaning operations
+            neighbor_verts = [edge.other_vert(mid_vert) for edge in mid_vert.link_edges]
+            clean_faces = self.clean_local_zone([mid_vert] + neighbor_verts)
+
+            # -- Optimizing: Edge rotation --
+            modified_faces = self.rotate_edges(mid_vert)
+
+            # -- Smoothing: Tangent space smoothing --
+            all_modified_faces = mid_vert_faces + clean_faces + modified_faces
+            all_modified_faces_valid = [f for f in all_modified_faces if f.is_valid]
+            smooth_verts = get_unique_verts(all_modified_faces_valid)
+
+            if smooth_verts:
+                self.smooth_mesh(verts=smooth_verts, relax_iter=10)
+                push_updated_faces(
+                    heap=self.heap,
+                    faces=get_unique_faces(
+                        verts=smooth_verts, initial_faces=all_modified_faces_valid
+                    ),
+                )
+
+            if mesh_iteration % 100 == 0:
+                self.log(f"\n--- Iteration {mesh_iteration} done ---")
+                self.log(f"-> Total faces = {len(self.bm.faces)}")
+                self.log(
+                    f"-> Total removed faces = {initial_mesh_faces - len(self.bm.faces)}"
+                )
+                self.log(
+                    f"-> Total removed faces (in iter) = {iteration_faces - len(self.bm.faces)}"
+                )
+                self.log(f"-> Heap size = {len(self.heap._data)}")
+
+            mesh_iteration += 1
+
+        self.log(f"\n\nFinal number of faces: {len(self.bm.faces)}")
+        self.log(f"Heap size: {len(self.heap._data)}")
+        self.log(f"Total iterations: {mesh_iteration}")
+        self.log("\n--- # Stats # ---")
+        self.log(f"Total removed faces: {initial_mesh_faces - len(self.bm.faces)}")
+        self.log(f"Total invalid faces: {total_invalid_faces}")
+        self.log(f"Total outdated faces: {total_outdated_faces}")
+        self.log(f"Total non-quad faces: {total_non_quad_faces}")
+
+        self.initial_mesh.free()
+        return self.bm
 
 
 if __name__ == "__main__":
-    # Set up logging configuration
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s"
-    )
-
-    global VERBOSE
-    VERBOSE = False
-
-    # visualize_fitmap(sfitmap=True)
-
-    # """
     # Get the active mesh
     me = bpy.context.object.data
 
@@ -1307,16 +1297,10 @@ if __name__ == "__main__":
     bm = bmesh.new()  # create an empty BMesh
     bm.from_mesh(me)  # fill it in from a Mesh
 
-    # Preprocessing - Compute the Scale and Maximal radius fitmaps
-    global INITIAL_MESH
-    INITIAL_MESH = bm.copy()
-    compute_fitmaps()
-
-    bm = simplify_mesh(bm, 0)
+    bm = MeshSimplifier(bm=bm, verbose=True).simplify_mesh(nb_faces=0)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
     bm.free()  # free and prevent further access
 
     me.update()
-    # """
