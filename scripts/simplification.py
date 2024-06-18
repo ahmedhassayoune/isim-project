@@ -293,9 +293,9 @@ class MyHeap(object):
         if initial:
             for i, item in enumerate(initial):
                 elem_uuid = uuid4().bytes
-                heap_elem = (key(item), i, elem_uuid, item)
                 item[self.uid_layer] = elem_uuid
                 self.heap_elem_occ[elem_uuid] = 1
+                heap_elem = (key(item), i, elem_uuid, item)
                 self._data.append(heap_elem)
             self.index = len(self._data)
             heapq.heapify(self._data)
@@ -304,14 +304,15 @@ class MyHeap(object):
         """Push an item to the heap."""
         if len(item.verts) != 4:
             return
-        if item[self.uid_layer] == 0:  # New item
+        if len(item[self.uid_layer]) == 0:  # New item
             elem_uuid = uuid4().bytes
             item[self.uid_layer] = elem_uuid
-            heap_elem = (self.key(item), self.index, elem_uuid, item)
             self.heap_elem_occ[elem_uuid] = 1
+            heap_elem = (self.key(item), self.index, elem_uuid, item)
         else:
-            heap_elem = (self.key(item), self.index, item[self.uid_layer], item)
-            self.heap_elem_occ[item[self.uid_layer]] += 1
+            elem_uuid = item[self.uid_layer]
+            heap_elem = (self.key(item), self.index, elem_uuid, item)
+            self.heap_elem_occ[elem_uuid] += 1
 
         heapq.heappush(self._data, heap_elem)
         self.index += 1
@@ -738,6 +739,23 @@ def get_unique_faces(
     return faces
 
 
+def get_unique_edges(
+    verts: list[bmesh.types.BMVert], initial_edges: list[bmesh.types.BMEdge] = None
+) -> list[bmesh.types.BMEdge]:
+    """Get a list of unique edges from the given list of vertices."""
+    edges = [] if initial_edges is None else initial_edges
+    visited = set()
+    for iedge in edges:
+        visited.add(iedge.index)
+
+    for vert in verts:
+        for edge in vert.link_edges:
+            if edge.index not in visited:
+                visited.add(edge.index)
+                edges.append(edge)
+    return edges
+
+
 def get_diagonal_vertices(vert: bmesh.types.BMVert) -> list[bmesh.types.BMVert]:
     """Get the diagonal vertices of the given vertex."""
     diagonals = []
@@ -833,7 +851,9 @@ def compute_mfitmap(
 
 
 class MeshSimplifier:
-    def __init__(self, bm: bmesh.types.BMesh, verbose: bool = False):
+    def __init__(
+        self, bm: bmesh.types.BMesh, dimensions: Vector, verbose: bool = False
+    ):
         # Logging params
         self.verbose = verbose
         logging.basicConfig(
@@ -845,11 +865,13 @@ class MeshSimplifier:
         # Mesh params
         bm.normal_update()  # Ensure normals are up-to-date
         self.bm = bm
+        self.dimensions = dimensions
         self.initial_mesh = bm.copy()
         self.bvh = None
         self.heap = None
         self.sfitmap_layer = None
         self.mfitmap_layer = None
+        self.mesh_iteration = 0
 
     def log(self, message: str, level: int = logging.INFO):
         """Log a message with the given level."""
@@ -864,10 +886,13 @@ class MeshSimplifier:
         avg_edges_length = np.mean(
             [edge.calc_length() for edge in self.initial_mesh.edges]
         )
-        max_radii = 5
-
+        max_radii = 7
         r0 = avg_edges_length
-        radii = np.array([r0 * (1 + i) for i in range(max_radii)])
+        rh = 6 * avg_edges_length
+        radii = r0 * np.exp(np.linspace(0, 1, max_radii) * np.log(rh / r0))
+        # max_radii = 5
+        # r0 = avg_edges_length
+        # radii = np.array([r0 * (1 + i) for i in range(max_radii)])
 
         len_verts = len(self.initial_mesh.verts)
         for i, vert in enumerate(self.initial_mesh.verts):
@@ -910,28 +935,41 @@ class MeshSimplifier:
 
             if i % 100 == 0:
                 self.log(f"Computed fitmaps for {i}/{len_verts}")
+        self.log("Finished computing fitmaps for all vertices")
 
     def visualize_fitmap(self, sfitmap: bool = True):
         """Color the vertices of the given mesh based on the given fitmap layer."""
+        mesh = bpy.context.object.data
+        # Add a new color layer if it doesn't exist
+        point_color_attribute = mesh.color_attributes.get(
+            "FitmapColors"
+        ) or mesh.color_attributes.new(
+            name="FitmapColors", type="BYTE_COLOR", domain="POINT"
+        )
+
         bpy.ops.object.mode_set(mode="EDIT")
 
+        # Update the bmesh to get color layer
+        self.bm.free()
+        self.bm = bmesh.new()
+        self.bm.from_mesh(mesh)
+
+        self.initial_mesh.free()
         self.initial_mesh = self.bm
         self.compute_fitmaps()
 
+        self.log("Setting colors based on fitmap values ...")
         fitmap_layer = self.sfitmap_layer if sfitmap else self.mfitmap_layer
         # Get the min and max values of the fitmap
         min_val = min([v[fitmap_layer] for v in self.bm.verts])
         max_val = max([v[fitmap_layer] for v in self.bm.verts])
 
-        point_color_attribute = self.bm.color_attributes.get(
-            "FitmapColors"
-        ) or self.bm.color_attributes.new(
-            name="FitmapColors", type="BYTE_COLOR", domain="POINT"
-        )
         point_color_layer = self.bm.verts.layers.color[point_color_attribute.name]
         # Compute the normalized fitmap values
         for vert in self.bm.verts:
             normalized_val = (vert[fitmap_layer] - min_val) / (max_val - min_val)
+            if not sfitmap:
+                normalized_val = 1 - normalized_val
             color = turbo_colormap[int(normalized_val * 255)]
             vert[point_color_layer] = (
                 color[0],
@@ -941,6 +979,7 @@ class MeshSimplifier:
             )  # Set Point Colors
         bpy.ops.object.mode_set(mode="OBJECT")
 
+        self.log("Finished setting colors based on fitmap values")
         return self.bm
 
     def build_bvh_tree(self):
@@ -1143,17 +1182,20 @@ class MeshSimplifier:
                 average_length[i] = np.mean(edges_len)
 
                 # Compute the force vector for each direct edge
+                average_forces[i] = Vector((0.0, 0.0, 0.0))
                 for edge in vert.link_edges:
                     other = edge.other_vert(vert)
                     force_vec = vert.co - other.co
+                    magnitude = force_vec.length
                     average_forces[i] += force_vec.normalized() * (
-                        average_length[i] - force_vec.length
+                        average_length[i] - magnitude
                     )
                 # Compute the force vector for each diagonal edge
                 for diag in diagonals:
                     force_vec = vert.co - diag.co
+                    magnitude = force_vec.length
                     average_forces[i] += force_vec.normalized() * (
-                        average_length[i] - force_vec.length / np.sqrt(2)
+                        average_length[i] - (magnitude / np.sqrt(2))
                     )
 
             changed = False
@@ -1206,7 +1248,7 @@ class MeshSimplifier:
         self.build_mesh_heap()
 
         initial_mesh_faces = len(self.bm.faces)
-        mesh_iteration = 0
+        self.mesh_iteration = 0
         total_invalid_faces = 0
         total_outdated_faces = 0
         total_non_quad_faces = 0
@@ -1221,6 +1263,10 @@ class MeshSimplifier:
                 total_invalid_faces += 1
                 continue
 
+            if len(face.verts) != 4:
+                total_non_quad_faces += 1
+                continue
+
             if priority != compute_priority(
                 bvh=self.bvh,
                 initial_mesh=self.initial_mesh,
@@ -1228,10 +1274,6 @@ class MeshSimplifier:
                 sfitmap_layer=self.sfitmap_layer,
             ):
                 total_outdated_faces += 1
-                continue
-
-            if len(face.verts) != 4:
-                total_non_quad_faces += 1
                 continue
 
             if not self.allow_collapse(face):
@@ -1263,8 +1305,8 @@ class MeshSimplifier:
                     ),
                 )
 
-            if mesh_iteration % 100 == 0:
-                self.log(f"\n--- Iteration {mesh_iteration} done ---")
+            if self.mesh_iteration % 100 == 0:
+                self.log(f"\n--- Iteration {self.mesh_iteration} done ---")
                 self.log(f"-> Total faces = {len(self.bm.faces)}")
                 self.log(
                     f"-> Total removed faces = {initial_mesh_faces - len(self.bm.faces)}"
@@ -1274,11 +1316,11 @@ class MeshSimplifier:
                 )
                 self.log(f"-> Heap size = {len(self.heap._data)}")
 
-            mesh_iteration += 1
+            self.mesh_iteration += 1
 
         self.log(f"\n\nFinal number of faces: {len(self.bm.faces)}")
         self.log(f"Heap size: {len(self.heap._data)}")
-        self.log(f"Total iterations: {mesh_iteration}")
+        self.log(f"Total iterations: {self.mesh_iteration}")
         self.log("\n--- # Stats # ---")
         self.log(f"Total removed faces: {initial_mesh_faces - len(self.bm.faces)}")
         self.log(f"Total invalid faces: {total_invalid_faces}")
@@ -1292,12 +1334,17 @@ class MeshSimplifier:
 if __name__ == "__main__":
     # Get the active mesh
     me = bpy.context.object.data
+    dim = bpy.context.object.dimensions
+    scale = bpy.context.object.scale
+
+    # If the mesh is scaled, normalize the dimensions
+    dim = Vector((dim[0] / scale[0], dim[1] / scale[1], dim[2] / scale[2]))
 
     # Get a BMesh representation
     bm = bmesh.new()  # create an empty BMesh
     bm.from_mesh(me)  # fill it in from a Mesh
 
-    bm = MeshSimplifier(bm=bm, verbose=True).simplify_mesh(nb_faces=0)
+    bm = MeshSimplifier(bm=bm, dimensions=dim, verbose=True).simplify_mesh(nb_faces=0)
 
     # Finish up, write the bmesh back to the mesh
     bm.to_mesh(me)
